@@ -1,3 +1,4 @@
 streamlit
 openai
 twilio
+openai==0.28.1
