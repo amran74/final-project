@@ -2,10 +2,15 @@ import streamlit as st
 from datetime import datetime, date
 import sqlite3
 import openai
+from twilio.rest import Client
+# This is a sync test to force Git to recognize the change
+# SYNC TEST 9 – Confirming file change
 
-# 🔐 OpenAI API Key
-openai.api_key ="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"
-# --- Database Functions ---
+
+# 🔐 API keys via Streamlit secrets
+openai.api_key = st.secrets.get("OPENAI_API_KEY", "sk-...")
+
+# --- Database ---
 def get_connection():
     return sqlite3.connect("inventory.db")
 
@@ -25,7 +30,7 @@ def get_all_items():
     conn.close()
     return items
 
-# --- GPT Suggestion Function ---
+# --- GPT Suggestion ---
 def get_ai_suggestion():
     items = get_all_items()
     if not items:
@@ -52,7 +57,63 @@ def get_ai_suggestion():
 
     return response.choices[0].message["content"]
 
-# --- Streamlit App Starts Here ---
+# --- WhatsApp: Expiring Items ---
+def get_expiring_items():
+    items = get_all_items()
+    expiring = []
+
+    for name, expiration, food_type in items:
+        exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
+        days_left = (exp_date - date.today()).days
+        if days_left <= 2:
+            expiring.append(f"{name} (in {days_left} days)")
+
+    return expiring
+
+def send_whatsapp_reminder():
+    expiring = get_expiring_items()
+    if not expiring:
+        return "✅ Nothing expiring soon."
+
+    message_text = "⚠️ Items expiring soon:\n" + "\n".join(expiring)
+
+    client = Client(
+        st.secrets["TWILIO_SID"],
+        st.secrets["TWILIO_AUTH_TOKEN"]
+    )
+
+    message = client.messages.create(
+        from_=st.secrets["WHATSAPP_FROM"],
+        body=message_text,
+        to=st.secrets["WHATSAPP_TO"]
+    )
+
+    return "✅ WhatsApp reminder sent!"
+
+# --- WhatsApp: Full Inventory ---
+def send_full_inventory_to_whatsapp():
+    items = get_all_items()
+    if not items:
+        return "📭 Inventory is empty. Nothing to send."
+
+    message = "📋 Current Inventory:\n"
+    for name, expiration, food_type in items:
+        message += f"- {name} ({food_type}), expiring on {expiration}\n"
+
+    client = Client(
+        st.secrets["TWILIO_SID"],
+        st.secrets["TWILIO_AUTH_TOKEN"]
+    )
+
+    client.messages.create(
+        from_=st.secrets["WHATSAPP_FROM"],
+        body=message,
+        to=st.secrets["WHATSAPP_TO"]
+    )
+
+    return "✅ Full inventory sent to WhatsApp."
+
+# --- Streamlit App UI ---
 st.title("🥗 Smart Food Inventory")
 
 # Add food form
@@ -88,10 +149,27 @@ else:
             f"**{idx}. {name}** | Type: {food_type} | Exp: `{expiration}` | {status}"
         )
 
-# GPT button
+# AI Suggestions
 st.subheader("🤖 AI Suggestions")
 if st.button("What should I use today?"):
     with st.spinner("Thinking..."):
         suggestion = get_ai_suggestion()
         st.success("Here's what I recommend:")
         st.write(suggestion)
+
+# WhatsApp Buttons (visible below AI suggestions)
+st.subheader("📲 WhatsApp Notifications")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    if st.button("Send Expiry Alert"):
+        with st.spinner("Sending..."):
+            result = send_whatsapp_reminder()
+            st.success(result)
+
+with col2:
+    if st.button("Send Full Inventory"):
+        with st.spinner("Sending full inventory..."):
+            result = send_full_inventory_to_whatsapp()
+            st.success(result)
