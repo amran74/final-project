@@ -3,9 +3,6 @@ from datetime import datetime, date
 import sqlite3
 import openai
 from twilio.rest import Client
-# This is a sync test to force Git to recognize the change
-# SYNC TEST 9 – Confirming file change
-
 
 # 🔐 API keys via Streamlit secrets
 openai.api_key = st.secrets.get("OPENAI_API_KEY", "sk-...")
@@ -13,6 +10,14 @@ openai.api_key = st.secrets.get("OPENAI_API_KEY", "sk-...")
 # --- Database ---
 def get_connection():
     return sqlite3.connect("inventory.db")
+
+def delete_expired_items():
+    today = date.today().strftime("%Y-%m-%d")
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM inventory WHERE expiration < ?", (today,))
+    conn.commit()
+    conn.close()
 
 def add_item(name, expiration, food_type):
     conn = get_connection()
@@ -29,6 +34,13 @@ def get_all_items():
     items = cursor.fetchall()
     conn.close()
     return items
+
+# --- WhatsApp Utilities ---
+def get_user_whatsapp_number():
+    num = st.session_state.get("phone_number", "").strip()
+    if not num.startswith("whatsapp:") and num != "":
+        num = "whatsapp:" + num
+    return num if num != "whatsapp:" else None
 
 # --- GPT Suggestion ---
 def get_ai_suggestion():
@@ -70,28 +82,24 @@ def get_expiring_items():
 
     return expiring
 
-def send_whatsapp_reminder():
+def send_whatsapp_reminder(to_number):
     expiring = get_expiring_items()
     if not expiring:
         return "✅ Nothing expiring soon."
 
     message_text = "⚠️ Items expiring soon:\n" + "\n".join(expiring)
 
-    client = Client(
-        st.secrets["TWILIO_SID"],
-        st.secrets["TWILIO_AUTH_TOKEN"]
-    )
-
-    message = client.messages.create(
+    client = Client(st.secrets["TWILIO_SID"], st.secrets["TWILIO_AUTH_TOKEN"])
+    client.messages.create(
         from_=st.secrets["WHATSAPP_FROM"],
         body=message_text,
-        to=st.secrets["WHATSAPP_TO"]
+        to=to_number
     )
 
     return "✅ WhatsApp reminder sent!"
 
 # --- WhatsApp: Full Inventory ---
-def send_full_inventory_to_whatsapp():
+def send_full_inventory_to_whatsapp(to_number):
     items = get_all_items()
     if not items:
         return "📭 Inventory is empty. Nothing to send."
@@ -100,21 +108,29 @@ def send_full_inventory_to_whatsapp():
     for name, expiration, food_type in items:
         message += f"- {name} ({food_type}), expiring on {expiration}\n"
 
-    client = Client(
-        st.secrets["TWILIO_SID"],
-        st.secrets["TWILIO_AUTH_TOKEN"]
-    )
-
+    client = Client(st.secrets["TWILIO_SID"], st.secrets["TWILIO_AUTH_TOKEN"])
     client.messages.create(
         from_=st.secrets["WHATSAPP_FROM"],
         body=message,
-        to=st.secrets["WHATSAPP_TO"]
+        to=to_number
     )
 
     return "✅ Full inventory sent to WhatsApp."
 
-# --- Streamlit App UI ---
+# --- App UI ---
+delete_expired_items()
+
 st.title("🥗 Smart Food Inventory")
+st.subheader("📱 Your WhatsApp Number")
+
+if "phone_number" not in st.session_state:
+    st.session_state.phone_number = ""
+
+phone = st.text_input("Enter your WhatsApp number (with +countrycode)", value=st.session_state.phone_number)
+
+if phone:
+    st.session_state.phone_number = phone
+    st.success(f"Using: {phone}")
 
 # Add food form
 with st.form("add_food_form"):
@@ -157,19 +173,27 @@ if st.button("What should I use today?"):
         st.success("Here's what I recommend:")
         st.write(suggestion)
 
-# WhatsApp Buttons (visible below AI suggestions)
+# WhatsApp Buttons
 st.subheader("📲 WhatsApp Notifications")
+
+user_number = get_user_whatsapp_number()
 
 col1, col2 = st.columns(2)
 
 with col1:
     if st.button("Send Expiry Alert"):
-        with st.spinner("Sending..."):
-            result = send_whatsapp_reminder()
-            st.success(result)
+        if user_number:
+            with st.spinner("Sending alert..."):
+                result = send_whatsapp_reminder(user_number)
+                st.success(result)
+        else:
+            st.warning("Please enter a valid WhatsApp number above.")
 
 with col2:
     if st.button("Send Full Inventory"):
-        with st.spinner("Sending full inventory..."):
-            result = send_full_inventory_to_whatsapp()
-            st.success(result)
+        if user_number:
+            with st.spinner("Sending full inventory..."):
+                result = send_full_inventory_to_whatsapp(user_number)
+                st.success(result)
+        else:
+            st.warning("Please enter a valid WhatsApp number above.")
