@@ -4,7 +4,7 @@ import sqlite3
 def get_connection():
     return sqlite3.connect("inventory.db")
 
-# Create users table
+# Create users table if not exists
 def create_users_table():
     conn = get_connection()
     cursor = conn.cursor()
@@ -18,8 +18,8 @@ def create_users_table():
     conn.commit()
     conn.close()
 
-# Create new user
-def create_user(phone, password):
+# Add new user (renamed correctly!)
+def add_user(phone, password):
     try:
         conn = get_connection()
         cursor = conn.cursor()
