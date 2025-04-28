@@ -41,7 +41,6 @@ def get_ai_suggestion(user_id):
     return response.choices[0].message["content"]
 
 def ai_assistant():
-    st.set_page_config(page_title="AI Assistant | Smart Inventory", page_icon="🤖")
     st.title("🤖 AI Assistant")
 
     if "user_id" not in st.session_state:

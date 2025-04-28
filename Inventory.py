@@ -22,7 +22,6 @@ def get_user_items(user_id):
     return items
 
 def inventory():
-    st.set_page_config(page_title="Inventory | Smart Inventory", page_icon="📦")
     st.title("📦 Your Inventory")
 
     if "user_id" not in st.session_state:
