@@ -2,9 +2,9 @@ import streamlit as st
 from db import create_users_table, create_user, authenticate_user
 
 def home():
-    st.set_page_config(page_title="Login | Smart Inventory", page_icon="🏠")
     st.title("🏠 Welcome to Smart Food Inventory")
 
+    # Ensure users table exists
     create_users_table()
 
     # --- Login / Register Tabs ---
@@ -19,6 +19,7 @@ def home():
         if st.button("Login"):
             user = authenticate_user(phone_login, password_login)
             if user:
+                st.session_state["authenticated"] = True
                 st.session_state["user_id"] = user[0]
                 st.session_state["phone"] = user[1]
                 st.success(f"✅ Logged in as {user[1]}")
