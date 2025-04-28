@@ -1,13 +1,17 @@
 import streamlit as st
 from db import create_users_table, add_user, authenticate_user
 
+# --- Home Page ---
 def home():
-    st.set_page_config(page_title="Login | Smart Inventory", page_icon="🧠")
+    st.set_page_config(page_title="Login | Smart Inventory", page_icon="🏠")
     st.title("🏠 Welcome to Smart Food Inventory")
+
+    # Ensure user table exists
+    create_users_table()
 
     tab1, tab2 = st.tabs(["🔑 Login", "📝 Register"])
 
-    # --- Login ---
+    # --- Login Tab ---
     with tab1:
         st.subheader("Login")
         phone_login = st.text_input("Phone Number", max_chars=20)
@@ -22,13 +26,15 @@ def home():
             else:
                 st.error("❌ Invalid phone number or password.")
 
-    # --- Register ---
+    # --- Register Tab ---
     with tab2:
         st.subheader("Register")
         phone_register = st.text_input("New Phone Number", max_chars=20, key="register_phone")
-        password_register = st.text_input("New Password", type="password", key="register_pass")
+        password_register = st.text_input("New Password", type="password", key="register_password")
 
         if st.button("Register"):
-            create_users_table()
-            add_user(phone_register, password_register)
-            st.success("✅ Registration successful! Please go back to Login.")
+            success = add_user(phone_register, password_register)
+            if success:
+                st.success("✅ Registration successful! Please login from Login tab.")
+            else:
+                st.error("❌ Phone number already registered.")
