@@ -1,5 +1,5 @@
 import streamlit as st
-from Home import home
+from home import home
 from Inventory import inventory
 from AI_Assistant import ai_assistant
 
