@@ -18,25 +18,8 @@ def create_users_table():
     conn.commit()
     conn.close()
 
-# --- Create Inventory Table ---
-def create_inventory_table():
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS inventory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            expiration DATE NOT NULL,
-            type TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-# --- Add New User ---
-def add_user(phone, password):
+# --- Register New User ---
+def create_user(phone, password):
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -44,10 +27,11 @@ def add_user(phone, password):
         conn.commit()
         conn.close()
         return True
-    except:
+    except Exception as e:
+        print(f"Error creating user: {e}")
         return False
 
-# --- Authenticate User ---
+# --- Authenticate Existing User ---
 def authenticate_user(phone, password):
     conn = get_connection()
     cursor = conn.cursor()
@@ -55,36 +39,3 @@ def authenticate_user(phone, password):
     user = cursor.fetchone()
     conn.close()
     return user
-
-# --- Inventory Functions ---
-def add_item(user_id, name, expiration, food_type):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO inventory (user_id, name, expiration, type) VALUES (?, ?, ?, ?)",
-        (user_id, name, expiration, food_type)
-    )
-    conn.commit()
-    conn.close()
-
-def get_user_inventory(user_id):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT name, expiration, type FROM inventory WHERE user_id = ?",
-        (user_id,)
-    )
-    items = cursor.fetchall()
-    conn.close()
-    return items
-
-def delete_expired_items(user_id):
-    today = date.today().strftime("%Y-%m-%d")
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "DELETE FROM inventory WHERE user_id = ? AND expiration < ?",
-        (user_id, today)
-    )
-    conn.commit()
-    conn.close()
