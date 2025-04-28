@@ -3,8 +3,6 @@ from home import home
 from Inventory import inventory
 from AI_Assistant import ai_assistant
 
-st.set_page_config(page_title="Smart Food Inventory", layout="wide")
-
 # --- Page Mapping ---
 PAGES = {
     "🏠 Home": home,
@@ -17,5 +15,15 @@ st.sidebar.title("📋 Navigation")
 selection = st.sidebar.radio("Go to:", list(PAGES.keys()))
 
 # --- Display Selected Page ---
-page = PAGES[selection]
-page()
+
+# ✅ Force authentication for non-Home pages
+if selection != "🏠 Home":
+    if "authenticated" not in st.session_state or not st.session_state["authenticated"]:
+        st.warning("⚠️ Please login first from Home page.")
+        home()  # 👈 show the Home page
+    else:
+        page = PAGES[selection]
+        page()
+else:
+    page = PAGES[selection]
+    page()
