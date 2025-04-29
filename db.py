@@ -54,3 +54,15 @@ def authenticate_user(phone, password):
     user = cursor.fetchone()
     conn.close()
     return user
+#update
+def update_item(item_id, name, expiration, food_type):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE inventory
+        SET name = ?, expiration = ?, type = ?
+        WHERE id = ?
+    ''', (name, expiration, food_type, item_id))
+    conn.commit()
+    conn.close()
+
