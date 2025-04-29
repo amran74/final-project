@@ -33,9 +33,9 @@ def inventory():
 
     # --- Add New Item Form ---
     with st.form("add_food_form"):
-        name = st.text_input("Food Name", max_chars=50)
+        name = st.text_input("product name", max_chars=50)
         expiration = st.date_input("Expiration Date", min_value=date.today())
-        food_type = st.selectbox("Food Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"])
+        food_type = st.selectbox("type Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"])
         submitted = st.form_submit_button("Add to Inventory")
 
         if submitted:
@@ -72,4 +72,5 @@ def inventory():
                 if st.button(f"💾 Save Changes for {idx}"):
                     update_item(item_id, new_name, new_expiration.strftime("%Y-%m-%d"), new_type)
                     st.success(f"✅ {new_name} updated successfully!")
-                    st.experimental_rerun()
+                    st.rerun()
+

@@ -1,4 +1,5 @@
 import streamlit as st
+from CalendarView import calendar_view
 
 # --- Set page config immediately (must be first Streamlit command) ---
 st.set_page_config(
@@ -16,7 +17,8 @@ from AI_Assistant import ai_assistant
 PAGES = {
     "🏠 Home": home,
     "📦 Inventory": inventory,
-    "🤖 AI Assistant": ai_assistant
+    "🤖 AI Assistant": ai_assistant,
+    "📅 Calendar View": calendar_view  # ✅ Fixed: added missing comma above
 }
 
 # --- Sidebar ---
