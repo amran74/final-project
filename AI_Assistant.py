@@ -43,14 +43,15 @@ def ai_assistant():
         else:
             selected_str = "\n".join(selected_items)
             prompt = (
-                "You are a helpful chef assistant.\n"
-                f"Based on these ingredients, no extras other than basics like oil sugar lemon etc, can suggest to get basic stuff too like spanich:\n{selected_str}\n\n"
-                "- Suggest one simple meal idea.\n"
-                "- List exact quantities for each ingredient (grams, ml, pieces).\n"
-                "- Give simple preparation instructions.\n"
-                "- Estimate total calories for the full meal.\n"
-                "- Format output like:\n"
-                "Ingredients:\n- Xg of Y\n\nInstructions:\n1. Step 1\n2. Step 2\n\nEstimated Calories: XXXX kcal"
+                   "You are a helpful chef assistant.\n"
+    f"Based on these ingredients:\n{selected_str}\n\n"
+    "- Suggest one simple meal idea.\n"
+    "- List exact quantities for each ingredient (grams, ml, pieces).\n"
+    "- If you use ingredients NOT in the list, clearly mark them as '(recommended to buy)'.\n"
+    "- Give simple preparation instructions.\n"
+    "- Estimate total calories and protein for the full meal.\n"
+    "- Format output like:\n"
+    "Ingredients:\n- Xg of Y (if needed)\n\nInstructions:\n1. Step 1\n\nEstimated Calories: XXXX kcal"
             )
 
             with st.spinner("🤔 Thinking..."):
