@@ -1,11 +1,12 @@
 import streamlit as st
-from db import create_users_table, create_user, authenticate_user
+from db import create_users_table, create_inventory_table, create_user, authenticate_user
 
 def home():
     st.title("🏠 Welcome to Smart Food Inventory")
 
-    # Ensure users table exists
+    # Ensure both tables exist
     create_users_table()
+    create_inventory_table()
 
     # --- Login / Register Tabs ---
     tab1, tab2 = st.tabs(["🔐 Login", "📝 Register"])

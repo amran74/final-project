@@ -1,6 +1,5 @@
 import sqlite3
 
-# --- Database Connection ---
 def get_connection():
     return sqlite3.connect("inventory.db")
 
@@ -18,7 +17,23 @@ def create_users_table():
     conn.commit()
     conn.close()
 
-# --- Register New User ---
+# --- Create Inventory Table (with user_id) ---
+def create_inventory_table():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS inventory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            expiration DATE NOT NULL,
+            type TEXT NOT NULL,
+            user_id INTEGER NOT NULL
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+# --- Register User ---
 def create_user(phone, password):
     try:
         conn = get_connection()
@@ -28,10 +43,10 @@ def create_user(phone, password):
         conn.close()
         return True
     except Exception as e:
-        print(f"Error creating user: {e}")
+        print(f"Error: {e}")
         return False
 
-# --- Authenticate Existing User ---
+# --- Authenticate User ---
 def authenticate_user(phone, password):
     conn = get_connection()
     cursor = conn.cursor()
