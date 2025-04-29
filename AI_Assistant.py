@@ -54,3 +54,37 @@ def ai_assistant():
             suggestion = get_ai_suggestion(user_id)
             st.success("Here's what I recommend:")
             st.write(suggestion)
+
+if st.button("Suggest Meal for Selected Items"):
+    if not selected:
+        st.warning("Please select at least one item.")
+    else:
+        selected_str = "\n".join(selected)
+        prompt = (
+            "You are a professional chef assistant.\n"
+            f"Based on these ingredients:\n{selected_str}\n\n"
+            "- Suggest one meal idea.\n"
+            "- List **exact quantities** of each ingredient (in grams, ml, pieces).\n"
+            "- Give **simple preparation instructions**.\n"
+            "- **Estimate total calories** for the entire meal.\n"
+            "- Format output as:\n\n"
+            "Ingredients:\n- X grams of Y\n- Z ml of W\n\n"
+            "Instructions:\n1. Step 1\n2. Step 2\n\n"
+            "Estimated Calories: XXXX kcal"
+        )
+
+        with st.spinner("Generating..."):
+            response = openai.ChatCompletion.create(
+                model="gpt-4",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6
+            )
+            recipe_response = response.choices[0].message["content"]
+            st.session_state["latest_recipe"] = recipe_response
+
+            st.success("✅ Here's a recipe suggestion:")
+            st.write(recipe_response)
+
+            # Show "Proceed" button
+            if st.button("✅ Proceed and update inventory"):
+                st.info("🔨 Inventory deduction system will be built in next step!")
