@@ -44,7 +44,7 @@ def ai_assistant():
             selected_str = "\n".join(selected_items)
             prompt = (
                 "You are a helpful chef assistant.\n"
-                f"Based on these ingredients:\n{selected_str}\n\n"
+                f"Based on these ingredients, no extras other than basics like oil sugar lemon etc, can suggest to get basic stuff too like spanich:\n{selected_str}\n\n"
                 "- Suggest one simple meal idea.\n"
                 "- List exact quantities for each ingredient (grams, ml, pieces).\n"
                 "- Give simple preparation instructions.\n"
