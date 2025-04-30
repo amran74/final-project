@@ -82,7 +82,7 @@ def inventory():
             else:
                 add_item(user_id, name, expiration.strftime("%Y-%m-%d"), food_type, amount, unit)
                 st.success(f"✅ {amount} {unit} of {name} added successfully!")
-                st.experimental_rerun()
+                st.rerun()
 
     # --- Display Current Inventory ---
     st.subheader("\U0001F4E6 Current Inventory")
