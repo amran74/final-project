@@ -107,7 +107,7 @@ def inventory():
                 new_exp = st.date_input(f"Edit Expiration {idx}", exp_date, key=f"exp{idx}")
                 new_type = st.selectbox(f"Edit Type {idx}", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"], index=["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"].index(food_type), key=f"type{idx}")
                 new_amt = st.number_input(f"Edit Amount {idx}", value=amount, step=1.0, key=f"amt{idx}")
-                new_unit = st.selectbox(f"Edit Unit {idx}", ["g", "ml", "pcs"], index=["g", "ml", "pcs"].index(unit), key=f"unit{idx}")
+                new_unit = st.selectbox(f"Edit Unit {idx}", ["kg", "liter", "pcs"], index=["kg", "liter", "pcs"].index(unit), key=f"unit{idx}")
 
                 col1, col2 = st.columns(2)
                 with col1:
