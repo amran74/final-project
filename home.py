@@ -1,5 +1,5 @@
 import streamlit as st
-st.set_page_config(page_title="Login | Smart Inventory", page_icon="🏠")
+
 
 from db import create_tables, create_user, authenticate_user
 
