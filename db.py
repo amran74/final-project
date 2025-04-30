@@ -1,12 +1,15 @@
 import sqlite3
 
+# --- DB Connection ---
 def get_connection():
     return sqlite3.connect("inventory.db")
 
-# --- Create Users Table ---
-def create_users_table():
+# --- Create Tables (Users + Inventory) ---
+def create_tables():
     conn = get_connection()
     cursor = conn.cursor()
+
+    # Users Table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -14,26 +17,25 @@ def create_users_table():
             password TEXT NOT NULL
         )
     ''')
-    conn.commit()
-    conn.close()
 
-# --- Create Inventory Table (with user_id) ---
-def create_inventory_table():
-    conn = get_connection()
-    cursor = conn.cursor()
+    # Inventory Table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS inventory (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
             name TEXT NOT NULL,
-            expiration DATE NOT NULL,
-            type TEXT NOT NULL,
-            user_id INTEGER NOT NULL
+            expiration TEXT NOT NULL,
+            type TEXT,
+            amount REAL DEFAULT 1,
+            unit TEXT DEFAULT 'pcs',
+            FOREIGN KEY(user_id) REFERENCES users(id)
         )
     ''')
+
     conn.commit()
     conn.close()
 
-# --- Register User ---
+# --- Create User ---
 def create_user(phone, password):
     try:
         conn = get_connection()
@@ -54,15 +56,15 @@ def authenticate_user(phone, password):
     user = cursor.fetchone()
     conn.close()
     return user
-#update
-def update_item(item_id, name, expiration, food_type):
+
+# --- Update Inventory Item ---
+def update_item(item_id, name, expiration, food_type, amount, unit):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
         UPDATE inventory
-        SET name = ?, expiration = ?, type = ?
+        SET name = ?, expiration = ?, type = ?, amount = ?, unit = ?
         WHERE id = ?
-    ''', (name, expiration, food_type, item_id))
+    ''', (name, expiration, food_type, amount, unit, item_id))
     conn.commit()
     conn.close()
-

@@ -93,3 +93,4 @@ def ai_assistant():
         st.subheader("✅ Proceed with this Recipe?")
         if st.button("✅ Confirm and Deduct Ingredients"):
             st.info("🚧 Inventory deduction system will be implemented in the next phase!")
+cv 
