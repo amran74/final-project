@@ -114,7 +114,7 @@ def inventory():
                     if st.button(f"💾 Save {idx}"):
                         update_item(item_id, new_name, new_exp.strftime("%Y-%m-%d"), new_type, new_amt, new_unit)
                         st.success("Item updated successfully.")
-                        st.experimental_rerun()
+                        st.rerun()
                 with col2:
                     if st.button(f"🗑️ Delete {idx}"):
                         delete_item(item_id)
