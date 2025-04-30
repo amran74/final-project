@@ -119,4 +119,4 @@ def inventory():
                     if st.button(f"🗑️ Delete {idx}"):
                         delete_item(item_id)
                         st.warning("Item deleted.")
-                        st.experimental_rerun()
+                        st.rerun()
