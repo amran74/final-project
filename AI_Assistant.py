@@ -76,7 +76,7 @@ def ai_assistant():
                     "List exact quantities using 'kg', 'liter', or 'pcs' and make sure the amount is suitable for a single person.\n"
                     "Then list recipe steps clearly.\n"
                     "Estimate total calories.\n"
-                    "Format the ingredient list in JSON, wrapped with triple backticks like this: ```json [{{"name": "rice", "amount": 0.2, "unit": "kg"}}, ...] ```"
+                    "Format the ingredient list in JSON, wrapped with triple backticks like this: ```json [{\"name\": \"rice\", \"amount\": 0.2, \"unit\": \"kg\"}, ...] ```"
                 )
             else:
                 prompt = (
@@ -86,7 +86,7 @@ def ai_assistant():
                     "You MAY suggest helpful extras, but label them as '(recommended to buy)'.\n"
                     "List exact quantities using 'kg', 'liter', or 'pcs'.\n"
                     "List the instructions clearly, and estimate total calories.\n"
-                    "Format the ingredient list in JSON, wrapped with triple backticks like this: ```json [{{"name": "rice", "amount": 0.2, "unit": "kg"}}, ...] ```"
+                    "Format the ingredient list in JSON, wrapped with triple backticks like this: ```json [{\"name\": \"rice\", \"amount\": 0.2, \"unit\": \"kg\"}, ...] ```"
                 )
 
             with st.spinner("🤔 Thinking..."):
