@@ -1,12 +1,16 @@
 import streamlit as st
-import openai
 import sqlite3
-from datetime import datetime, date
+import openai
+from datetime import datetime
 import json
 
+# Load OpenAI API key
 openai.api_key = st.secrets.get("OPENAI_API_KEY")
 
-# --- DB ---
+# Common pantry items allowed in flexible mode
+PANTRY_ITEMS = ["salt", "sugar", "black pepper", "olive oil", "vegetable oil", "butter", "lemon juice", "baking powder"]
+
+# --- DB connection ---
 def get_connection():
     return sqlite3.connect("inventory.db")
 
@@ -25,92 +29,104 @@ def update_item_amount(item_id, new_amount):
     conn.commit()
     conn.close()
 
+# --- Main Page ---
 def ai_assistant():
-    st.title("🤖 AI Meal Assistant")
+    st.title("🤖 Smart AI Assistant")
 
     if "user_id" not in st.session_state:
-        st.warning("⚠️ Please login first from Home page.")
+        st.warning("⚠️ Please login first.")
         return
 
     user_id = st.session_state["user_id"]
     items = get_user_items(user_id)
 
     if not items:
-        st.info("Your inventory is empty. Add some items to get suggestions.")
+        st.info("📭 Your inventory is empty.")
         return
 
-    # Build inventory string for AI
-    inventory_str = "\n".join([
-        f"{name} ({amount} {unit})"
-        for _, name, _, _, amount, unit in items
-    ])
+    item_names = [f"{name} ({type})" for _, name, _, type, _, _ in items]
 
-    # --- Prompt AI ---
-    if st.button("Generate Recipe Suggestion"):
-        with st.spinner("Thinking of a recipe..."):
-            prompt = (
-                "You are a kitchen assistant. Based on this inventory list, suggest a creative meal to avoid waste."
-                " Provide the recipe and ingredients in a JSON list (name, amount, unit).\n"
-                f"Inventory:\n{inventory_str}\n\n"
-                "Format the response like:\n"
-                "---\n"
-                "Meal: [meal title]\n"
-                "Instructions: [step-by-step instructions]\n"
-                "Ingredients: [\n  {\"name\": \"chicken\", \"amount\": 200, \"unit\": \"g\"}, ...\n]"
-            )
+    st.subheader("🍳 Create a Meal from Your Inventory")
+    selected_items = st.multiselect("Select ingredients:", item_names)
 
-            response = openai.ChatCompletion.create(
-                model="gpt-4",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7
-            )
+    # Suggestion Mode
+    suggestion_mode = st.radio(
+        "Suggestion Mode:",
+        [
+            "Strict: Only use selected ingredients",
+            "Flexible: Allow pantry items and suggest extras"
+        ],
+        index=1
+    )
 
-            full_text = response.choices[0].message.content
+    if st.button("🍚 Suggest Meal for Selected Items"):
+        if not selected_items:
+            st.warning("⚠️ Please select at least one item.")
+        else:
+            selected_str = "\n".join(selected_items)
 
-            # Extract sections
+            if suggestion_mode == "Strict: Only use selected ingredients":
+                prompt = (
+                    "You are a helpful chef assistant.\n"
+                    f"ONLY use the following ingredients:\n{selected_str}\n\n"
+                    "Do NOT use any other ingredients.\n"
+                    "Suggest one simple recipe using ONLY these.\n"
+                    "List exact quantities (grams/ml), clear steps, and estimated total calories.\n"
+                    "Format the ingredient list as JSON: [ {\"name\": \",\"amount\": , \"unit\": \"\"}, ... ]"
+                )
+            else:
+                pantry_list = ", ".join(PANTRY_ITEMS)
+                prompt = (
+                    "You are a helpful chef assistant.\n"
+                    f"Main ingredients:\n{selected_str}\n\n"
+                    f"You may also use these pantry items if needed: {pantry_list}.\n"
+                    "You MAY suggest other helpful ingredients, but clearly label them as '(recommended to buy)'.\n"
+                    "List quantities (grams/ml), give clear steps, and estimate total calories.\n"
+                    "Format the ingredient list as JSON: [ {\"name\": \",\"amount\": , \"unit\": \"\"}, ... ]"
+                )
+
+            with st.spinner("🤔 Thinking..."):
+                response = openai.ChatCompletion.create(
+                    model="gpt-4",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.6
+                )
+                result = response.choices[0].message["content"]
+                st.session_state["latest_recipe"] = result
+                st.success("✅ Recipe Generated!")
+                st.markdown(result)
+
+    # --- Proceed Button ---
+    if "latest_recipe" in st.session_state:
+        st.subheader("✅ Proceed with this Recipe?")
+        if st.button("✅ Confirm and Deduct Ingredients"):
             try:
-                meal_title = full_text.split("Meal:")[1].split("Instructions:")[0].strip()
-                instructions = full_text.split("Instructions:")[1].split("Ingredients:")[0].strip()
-                ingredients_block = full_text.split("Ingredients:")[1].strip()
-                ingredients_list = json.loads(ingredients_block)
-            except Exception as e:
-                st.error("Failed to parse recipe. Try again.")
-                st.text(full_text)
+                ingredients_str = st.session_state["latest_recipe"].split("Ingredients:")[1]
+                ingredients_json = json.loads(ingredients_str)
+            except:
+                st.warning("⚠️ Could not parse ingredients. Skipping deduction.")
                 return
 
-            # Display recipe
-            st.subheader(meal_title)
-            st.markdown(f"**Instructions:**\n{instructions}")
-            st.markdown("**Ingredients Needed:**")
-            for ing in ingredients_list:
-                st.markdown(f"- {ing['amount']} {ing['unit']} of {ing['name']}")
+            deducted = []
+            missing = []
+            for ing in ingredients_json:
+                found = False
+                for item in items:
+                    item_id, name, _, _, amount, unit = item
+                    if name.lower() == ing["name"].lower() and unit == ing["unit"]:
+                        if amount >= ing["amount"]:
+                            new_amount = round(amount - ing["amount"], 2)
+                            update_item_amount(item_id, new_amount)
+                            deducted.append(ing["name"])
+                        else:
+                            missing.append(f"{ing['name']} (have {amount}, need {ing['amount']})")
+                        found = True
+                        break
+                if not found:
+                    missing.append(f"{ing['name']} (not found)")
 
-            # --- Deduct Button ---
-            if st.button("✅ Proceed with This Recipe"):
-                deducted = []
-                not_found = []
-
-                for ing in ingredients_list:
-                    matched = False
-                    for item in items:
-                        item_id, name, exp, food_type, amount, unit = item
-                        if name.lower() == ing["name"].lower() and unit == ing["unit"]:
-                            if amount >= ing["amount"]:
-                                new_amt = round(amount - ing["amount"], 2)
-                                update_item_amount(item_id, new_amt)
-                                deducted.append(ing["name"])
-                                matched = True
-                                break
-                            else:
-                                not_found.append(f"{ing['name']} (needed {ing['amount']}, have {amount})")
-                                matched = True
-                                break
-                    if not matched:
-                        not_found.append(f"{ing['name']} (not in inventory)")
-
-                if deducted:
-                    st.success(f"✅ Deducted: {', '.join(deducted)}")
-                if not_found:
-                    st.warning("⚠️ Issues:\n" + "\n".join(not_found))
-
-                st.rerun()
+            if deducted:
+                st.success(f"✅ Deducted: {', '.join(deducted)}")
+            if missing:
+                st.warning("⚠️ Missing or insufficient: " + ", ".join(missing))
+            st.rerun()
