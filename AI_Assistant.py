@@ -71,11 +71,12 @@ def ai_assistant():
                 prompt = (
                     "You are a helpful chef assistant.\n"
                     f"ONLY use the following ingredients:\n{selected_str}\n\n"
-                    "Use only these ingredients \u2014 no others allowed.\n"
-                    "List exact quantities using 'kg', 'liter', or 'pcs'.\n"
+                    f"You may also use pantry items if needed: {pantry_list}.\n"
+                    "Use only these ingredients — no others allowed other than basic pantry items.\n"
+                    "List exact quantities using 'kg', 'liter', or 'pcs' and make sure the amount is suitable for a single person.\n"
                     "Then list recipe steps clearly.\n"
                     "Estimate total calories.\n"
-                    "Format ingredients in JSON and wrap with triple backticks under 'Ingredients:'."
+                    "Format the ingredient list in JSON, wrapped with triple backticks like this: ```json [{{"name": "rice", "amount": 0.2, "unit": "kg"}}, ...] ```"
                 )
             else:
                 prompt = (
@@ -85,7 +86,7 @@ def ai_assistant():
                     "You MAY suggest helpful extras, but label them as '(recommended to buy)'.\n"
                     "List exact quantities using 'kg', 'liter', or 'pcs'.\n"
                     "List the instructions clearly, and estimate total calories.\n"
-                    "Wrap the ingredient JSON list with triple backticks under 'Ingredients:'."
+                    "Format the ingredient list in JSON, wrapped with triple backticks like this: ```json [{{"name": "rice", "amount": 0.2, "unit": "kg"}}, ...] ```"
                 )
 
             with st.spinner("🤔 Thinking..."):
@@ -108,33 +109,38 @@ def ai_assistant():
                 match = re.search(r"```json\s*(\[.*?\])\s*```", st.session_state["latest_recipe"], re.DOTALL)
                 if match:
                     ingredients_str = match.group(1)
+                    ingredients_json = json.loads(ingredients_str)
                 else:
-                    # Fallback: try extracting list after 'Ingredients:'
-                    fallback = st.session_state["latest_recipe"].split("Ingredients:")[-1].strip()
-                    ingredients_str = fallback.split("\n")[0] if fallback.startswith("[") else None
-                ingredients_json = json.loads(ingredients_str)
+                    raise ValueError("Could not extract JSON block.")
             except Exception as e:
-                st.warning("\u26a0\ufe0f Could not parse ingredients. Skipping deduction.")
+                st.warning("⚠️ Could not parse ingredients. Skipping deduction.")
                 st.text(f"Error: {e}")
                 return
 
             deducted = []
             missing = []
+            inventory_map = {
+                name.lower(): (item_id, amount, unit)
+                for item_id, name, _, _, amount, unit in items
+            }
+
             for ing in ingredients_json:
-                found = False
-                for item in items:
-                    item_id, name, _, _, amount, unit = item
-                    if name.lower() == ing["name"].lower() and unit == ing["unit"]:
-                        if amount >= ing["amount"]:
-                            new_amount = round(amount - ing["amount"], 2)
-                            update_item_amount(item_id, new_amount)
-                            deducted.append(ing["name"])
+                ing_name = ing["name"].lower()
+                ing_amount = ing["amount"]
+                ing_unit = ing["unit"]
+                if ing_name in inventory_map:
+                    item_id, current_amount, current_unit = inventory_map[ing_name]
+                    if ing_unit == current_unit:
+                        if current_amount >= ing_amount:
+                            update_item_amount(item_id, round(current_amount - ing_amount, 2))
+                            deducted.append(ing_name)
                         else:
-                            missing.append(f"{ing['name']} (have {amount}, need {ing['amount']})")
-                        found = True
-                        break
-                if not found:
-                    missing.append(f"{ing['name']} (not found)")
+                            missing.append(f"{ing_name} (have {current_amount}, need {ing_amount})")
+                    else:
+                        missing.append(f"{ing_name} (unit mismatch: {current_unit} vs {ing_unit})")
+                else:
+                    if ing_name not in [p.lower() for p in PANTRY_ITEMS]:
+                        missing.append(f"{ing_name} (not found)")
 
             if deducted:
                 st.success(f"✅ Deducted: {', '.join(deducted)}")
