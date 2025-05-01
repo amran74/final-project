@@ -6,7 +6,7 @@ import json
 import re
 
 # Load OpenAI API key
-openai.api_key = st.secrets.get("OPENAI_API_KEY")
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 # Common pantry items allowed in flexible mode
 PANTRY_ITEMS = ["salt", "sugar", "black pepper", "olive oil", "vegetable oil", "butter", "lemon juice", "baking powder"]
