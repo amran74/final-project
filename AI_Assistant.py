@@ -98,13 +98,14 @@ def ai_assistant():
                 result = response.choices[0].message["content"]
                 st.session_state["latest_recipe"] = result
                 st.success("✅ Recipe Generated!")
-                st.markdown(result)
 
                 # Clean display of Ingredient List
                 match = re.search(r"```json\\s*(\[.*?\])\\s*```", result, re.DOTALL)
                 if match:
                     try:
                         ingredients_json = json.loads(match.group(1))
+                        st.session_state["deduct_ingredients"] = ingredients_json
+
                         st.subheader("🧾 Ingredient List:")
                         for ing in ingredients_json:
                             label = ing["name"]
@@ -113,9 +114,10 @@ def ai_assistant():
                                 st.markdown(f"- 🛒 *{ing['amount']} {ing['unit']} {label}*")
                             else:
                                 st.markdown(f"- {ing['amount']} {ing['unit']} {label}")
-                        st.session_state["deduct_ingredients"] = ingredients_json
                     except:
                         pass
+
+                st.markdown(result.split("```json")[0])
 
     # --- Proceed Button ---
     if "latest_recipe" in st.session_state and suggestion_mode == "Strict: Only use selected ingredients":
