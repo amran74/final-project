@@ -100,8 +100,8 @@ def ai_assistant():
                 st.success("✅ Recipe Generated!")
                 st.markdown(result)
 
-                # Display parsed ingredients
-                match = re.search(r"```json\s*(\[.*?\])\s*```", result, re.DOTALL)
+                # Clean display of Ingredient List
+                match = re.search(r"```json\\s*(\[.*?\])\\s*```", result, re.DOTALL)
                 if match:
                     try:
                         ingredients_json = json.loads(match.group(1))
@@ -113,21 +113,18 @@ def ai_assistant():
                                 st.markdown(f"- 🛒 *{ing['amount']} {ing['unit']} {label}*")
                             else:
                                 st.markdown(f"- {ing['amount']} {ing['unit']} {label}")
-                    except Exception as e:
-                        st.warning("⚠️ Couldn't format ingredients list cleanly.")
-                        st.text(f"Error: {e}")
+                        st.session_state["deduct_ingredients"] = ingredients_json
+                    except:
+                        pass
 
     # --- Proceed Button ---
     if "latest_recipe" in st.session_state and suggestion_mode == "Strict: Only use selected ingredients":
         st.subheader("✅ Proceed with this Recipe?")
         if st.button("✅ Confirm and Deduct Ingredients"):
             try:
-                match = re.search(r"```json\s*(\[.*?\])\s*```", st.session_state["latest_recipe"], re.DOTALL)
-                if match:
-                    ingredients_str = match.group(1)
-                    ingredients_json = json.loads(ingredients_str)
-                else:
-                    raise ValueError("Could not extract JSON block.")
+                ingredients_json = st.session_state.get("deduct_ingredients")
+                if not ingredients_json:
+                    raise ValueError("No parsed ingredients in session.")
             except Exception as e:
                 st.warning("⚠️ Could not parse ingredients. Skipping deduction.")
                 st.text(f"Error: {e}")
