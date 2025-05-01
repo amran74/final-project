@@ -3,6 +3,7 @@ import sqlite3
 import openai
 from datetime import datetime
 import json
+import re
 
 # Load OpenAI API key
 openai.api_key = st.secrets.get("OPENAI_API_KEY")
@@ -41,7 +42,7 @@ def ai_assistant():
     items = get_user_items(user_id)
 
     if not items:
-        st.info("📭 Your inventory is empty.")
+        st.info("📬 Your inventory is empty.")
         return
 
     item_names = [f"{name} ({type})" for _, name, _, type, _, _ in items]
@@ -64,25 +65,27 @@ def ai_assistant():
             st.warning("⚠️ Please select at least one item.")
         else:
             selected_str = "\n".join(selected_items)
+            pantry_list = ", ".join(PANTRY_ITEMS)
 
             if suggestion_mode == "Strict: Only use selected ingredients":
                 prompt = (
                     "You are a helpful chef assistant.\n"
                     f"ONLY use the following ingredients:\n{selected_str}\n\n"
-                    "Do NOT use any other ingredients.\n"
-                    "Suggest one simple recipe using ONLY these.\n"
-                    "List exact quantities (grams/ml), clear steps, and estimated total calories.\n"
-                    "Format the ingredient list as JSON: [ {\"name\": \",\"amount\": , \"unit\": \"\"}, ... ]"
+                    "Use only these ingredients \u2014 no others allowed.\n"
+                    "List exact quantities using 'kg', 'liter', or 'pcs'.\n"
+                    "Then list recipe steps clearly.\n"
+                    "Estimate total calories.\n"
+                    "Format ingredients in JSON and wrap with triple backticks under 'Ingredients:'."
                 )
             else:
-                pantry_list = ", ".join(PANTRY_ITEMS)
                 prompt = (
                     "You are a helpful chef assistant.\n"
-                    f"Main ingredients:\n{selected_str}\n\n"
-                    f"You may also use these pantry items if needed: {pantry_list}.\n"
-                    "You MAY suggest other helpful ingredients, but clearly label them as '(recommended to buy)'.\n"
-                    "List quantities (grams/ml), give clear steps, and estimate total calories.\n"
-                    "Format the ingredient list as JSON: [ {\"name\": \",\"amount\": , \"unit\": \"\"}, ... ]"
+                    f"Use these main ingredients:\n{selected_str}\n\n"
+                    f"You may also use pantry items if needed: {pantry_list}.\n"
+                    "You MAY suggest helpful extras, but label them as '(recommended to buy)'.\n"
+                    "List exact quantities using 'kg', 'liter', or 'pcs'.\n"
+                    "List the instructions clearly, and estimate total calories.\n"
+                    "Wrap the ingredient JSON list with triple backticks under 'Ingredients:'."
                 )
 
             with st.spinner("🤔 Thinking..."):
@@ -101,10 +104,18 @@ def ai_assistant():
         st.subheader("✅ Proceed with this Recipe?")
         if st.button("✅ Confirm and Deduct Ingredients"):
             try:
-                ingredients_str = st.session_state["latest_recipe"].split("Ingredients:")[1]
+                # Try to extract JSON from triple backticks
+                match = re.search(r"```json\s*(\[.*?\])\s*```", st.session_state["latest_recipe"], re.DOTALL)
+                if match:
+                    ingredients_str = match.group(1)
+                else:
+                    # Fallback: try extracting list after 'Ingredients:'
+                    fallback = st.session_state["latest_recipe"].split("Ingredients:")[-1].strip()
+                    ingredients_str = fallback.split("\n")[0] if fallback.startswith("[") else None
                 ingredients_json = json.loads(ingredients_str)
-            except:
-                st.warning("⚠️ Could not parse ingredients. Skipping deduction.")
+            except Exception as e:
+                st.warning("\u26a0\ufe0f Could not parse ingredients. Skipping deduction.")
+                st.text(f"Error: {e}")
                 return
 
             deducted = []
@@ -129,4 +140,5 @@ def ai_assistant():
                 st.success(f"✅ Deducted: {', '.join(deducted)}")
             if missing:
                 st.warning("⚠️ Missing or insufficient: " + ", ".join(missing))
+
             st.rerun()
