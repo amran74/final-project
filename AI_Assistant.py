@@ -100,24 +100,30 @@ def ai_assistant():
                 st.success("✅ Recipe Generated!")
 
                 # Clean display of Ingredient List
-                match = re.search(r"```json\\s*(\[.*?\])\\s*```", result, re.DOTALL)
+                match = re.search(r"```json\s*(\[.*?\])\s*```", result, re.DOTALL)
                 if match:
                     try:
                         ingredients_json = json.loads(match.group(1))
                         st.session_state["deduct_ingredients"] = ingredients_json
-
-                        st.subheader("🧾 Ingredient List:")
-                        for ing in ingredients_json:
-                            label = ing["name"]
-                            if "recommended to buy" in label.lower():
-                                label = label.split(":", 1)[-1].strip()
-                                st.markdown(f"- 🛒 *{ing['amount']} {ing['unit']} {label}*")
-                            else:
-                                st.markdown(f"- {ing['amount']} {ing['unit']} {label}")
                     except:
-                        pass
+                        ingredients_json = []
+                else:
+                    ingredients_json = []
 
-                st.markdown(result.split("```json")[0])
+                # Display the recipe text (excluding the JSON block)
+                clean_text = re.split(r"```json.*?```", result, flags=re.DOTALL)[-1].strip()
+                st.markdown(clean_text)
+
+                # Display clean bullet list of ingredients
+                if ingredients_json:
+                    st.subheader("🧾 Ingredient List:")
+                    for ing in ingredients_json:
+                        label = ing["name"]
+                        if "recommended to buy" in label.lower():
+                            label = label.split(":", 1)[-1].strip()
+                            st.markdown(f"- 🛒 *{ing['amount']} {ing['unit']} {label}*")
+                        else:
+                            st.markdown(f"- {ing['amount']} {ing['unit']} {label}")
 
     # --- Proceed Button ---
     if "latest_recipe" in st.session_state and suggestion_mode == "Strict: Only use selected ingredients":
