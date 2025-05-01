@@ -100,12 +100,28 @@ def ai_assistant():
                 st.success("✅ Recipe Generated!")
                 st.markdown(result)
 
+                # Display parsed ingredients
+                match = re.search(r"```json\s*(\[.*?\])\s*```", result, re.DOTALL)
+                if match:
+                    try:
+                        ingredients_json = json.loads(match.group(1))
+                        st.subheader("🧾 Ingredient List:")
+                        for ing in ingredients_json:
+                            label = ing["name"]
+                            if "recommended to buy" in label.lower():
+                                label = label.split(":", 1)[-1].strip()
+                                st.markdown(f"- 🛒 *{ing['amount']} {ing['unit']} {label}*")
+                            else:
+                                st.markdown(f"- {ing['amount']} {ing['unit']} {label}")
+                    except Exception as e:
+                        st.warning("⚠️ Couldn't format ingredients list cleanly.")
+                        st.text(f"Error: {e}")
+
     # --- Proceed Button ---
-    if "latest_recipe" in st.session_state:
+    if "latest_recipe" in st.session_state and suggestion_mode == "Strict: Only use selected ingredients":
         st.subheader("✅ Proceed with this Recipe?")
         if st.button("✅ Confirm and Deduct Ingredients"):
             try:
-                # Try to extract JSON from triple backticks
                 match = re.search(r"```json\s*(\[.*?\])\s*```", st.session_state["latest_recipe"], re.DOTALL)
                 if match:
                     ingredients_str = match.group(1)
