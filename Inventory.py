@@ -51,7 +51,7 @@ def update_item(item_id, name, expiration, food_type, amount, unit):
     conn.commit()
     conn.close()
 
-# --- Inventory Page ---
+# --- Inventory UI ---
 def inventory():
     st.markdown("<h2 style='text-align:center; color:#FF5A5F;'>📦 Smart Inventory Manager</h2>", unsafe_allow_html=True)
 
@@ -63,20 +63,18 @@ def inventory():
     delete_expired_items(user_id)
     items = get_user_items(user_id)
 
-    # --- Add Item Form ---
+    # --- Add Form ---
     st.markdown("### ➕ Add New Item")
     with st.form("add_food_form", clear_on_submit=True):
         col1, col2, col3 = st.columns([2, 1, 1])
         name = col1.text_input("Food Name", max_chars=50)
         expiration = col2.date_input("Expiration Date", min_value=date.today())
         food_type = col3.selectbox("Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"])
-
         col4, col5 = st.columns([1, 1])
         amount = col4.number_input("Amount", min_value=0.1, step=1.0)
         unit = col5.selectbox("Unit", ["kg", "liter", "pcs"])
 
-        submitted = st.form_submit_button("✅ Add to Inventory")
-        if submitted:
+        if st.form_submit_button("✅ Add to Inventory"):
             if not name.strip():
                 st.warning("⚠️ Food name is required.")
             else:
@@ -87,7 +85,7 @@ def inventory():
     # --- Inventory Display ---
     st.markdown("### 📋 Your Inventory")
     if not items:
-        st.info("🪹 Your inventory is empty.")
+        st.info("🪹 Inventory is empty.")
     else:
         colA, colB = st.columns(2)
         for idx, (item_id, name, expiration, food_type, amount, unit) in enumerate(items):
@@ -116,32 +114,26 @@ def inventory():
                     </div>
                     """, unsafe_allow_html=True)
 
-                    btn1, btn2, btn3 = st.columns([1, 1, 1])
+                    b1, b2 = st.columns([1, 1])
 
-                    # ➕ Quick Add
-                    if btn1.button("➕", key=f"plus_{item_id}"):
-                        increment = 1.0 if unit == "pcs" else 0.1
-                        new_amount = round(amount + increment, 2)
-                        update_item(item_id, name, expiration, food_type, new_amount, unit)
-                        st.success(f"Added {increment} {unit} to {name}")
-                        st.rerun()
-
-                    # ✏️ Edit Form
-                    if btn2.button("✏️ Edit", key=f"edit_{item_id}"):
+                    # ✏️ Edit
+                    if b1.button("✏️ Edit", key=f"edit_{item_id}"):
                         with st.form(f"edit_form_{item_id}"):
                             new_name = st.text_input("Name", value=name)
                             new_exp = st.date_input("Expiration", value=exp_date)
                             new_type = st.selectbox("Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"],
-                                                    index=["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"].index(food_type))
-                            new_amt = st.number_input("Amount", value=amount)
+                                index=["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"].index(food_type))
+                            new_amt = st.number_input("Amount", value=amount, step=1.0 if unit == "pcs" else 0.1)
                             new_unit = st.selectbox("Unit", ["kg", "liter", "pcs"], index=["kg", "liter", "pcs"].index(unit))
+
                             if st.form_submit_button("💾 Save Changes"):
                                 update_item(item_id, new_name, new_exp.strftime("%Y-%m-%d"), new_type, new_amt, new_unit)
+                                delete_expired_items(user_id)
                                 st.success("✅ Item updated.")
                                 st.rerun()
 
                     # 🗑️ Delete
-                    if btn3.button("🗑️ Delete", key=f"delete_{item_id}"):
+                    if b2.button("🗑️ Delete", key=f"delete_{item_id}"):
                         delete_item(item_id)
                         st.warning("🗑️ Item deleted.")
                         st.rerun()
