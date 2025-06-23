@@ -9,12 +9,13 @@ def create_tables():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Users Table
+    # Users Table (now includes name)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             phone TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
+            password TEXT NOT NULL,
+            name TEXT NOT NULL
         )
     ''')
 
@@ -36,11 +37,11 @@ def create_tables():
     conn.close()
 
 # --- Create User ---
-def create_user(phone, password):
+def create_user(phone, password, name):
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO users (phone, password) VALUES (?, ?)", (phone, password))
+        cursor.execute("INSERT INTO users (phone, password, name) VALUES (?, ?, ?)", (phone, password, name))
         conn.commit()
         conn.close()
         return True
@@ -52,7 +53,7 @@ def create_user(phone, password):
 def authenticate_user(phone, password):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, phone FROM users WHERE phone = ? AND password = ?", (phone, password))
+    cursor.execute("SELECT id, phone, name FROM users WHERE phone = ? AND password = ?", (phone, password))
     user = cursor.fetchone()
     conn.close()
     return user
