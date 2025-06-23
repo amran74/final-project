@@ -104,49 +104,61 @@ def inventory():
                 color = "#4CAF50"
 
             with col:
-                with st.container():
-                    st.markdown(f"""
+                st.markdown(f"""
                     <div style='background-color:#1f1f1f;border-left:5px solid {color};padding:15px 20px;border-radius:12px;margin-bottom:15px'>
                         <h4 style='margin-bottom:0;color:#FAFAFA'>{name} <span style='font-size:14px;color:#888;'>({food_type})</span></h4>
                         <p style='margin:4px 0;color:#CCC;'>📅 <b>Expires:</b> {expiration}</p>
                         <p style='margin:4px 0;color:#CCC;'>🔢 <b>Amount:</b> {amount} {unit}</p>
                         <p style='margin:4px 0;color:#CCC;'>📌 <b>Status:</b> <span style='color:{color}'>{status}</span></p>
                     </div>
-                    """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
 
-                    b1, b2 = st.columns([1, 1])
+                # --- Edit State Control ---
+                edit_key = f"editing_{item_id}"
+                if edit_key not in st.session_state:
+                    st.session_state[edit_key] = False
 
-                    # ✏️ Edit
-                    if b1.button("✏️ Edit", key=f"edit_{item_id}"):
-                        with st.form(f"edit_form_{item_id}"):
-                            new_name = st.text_input("Name", value=name)
-                            new_exp = st.date_input("Expiration", value=exp_date)
-                            new_type = st.selectbox("Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"],
-                                index=["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"].index(food_type))
-                            new_amt = st.number_input("Amount", value=amount, step=1.0 if unit == "pcs" else 0.1)
-                            new_unit = st.selectbox("Unit", ["kg", "liter", "pcs"], index=["kg", "liter", "pcs"].index(unit))
-
-                            if st.form_submit_button("💾 Save Changes"):
-                                update_item(item_id, new_name, new_exp.strftime("%Y-%m-%d"), new_type, new_amt, new_unit)
-                                delete_expired_items(user_id)
-                                st.success("✅ Item updated.")
-                                st.rerun()
-
-                    # 🗑️ Delete
-                    if b2.button("🗑️ Delete", key=f"delete_{item_id}"):
-                        delete_item(item_id)
-                        st.warning("🗑️ Item deleted.")
+                col_btn1, col_btn2 = st.columns([1, 1])
+                if not st.session_state[edit_key]:
+                    if col_btn1.button("✏️ Edit", key=f"edit_btn_{item_id}"):
+                        st.session_state[edit_key] = True
                         st.rerun()
+                else:
+                    with st.form(f"edit_form_{item_id}"):
+                        new_name = st.text_input("Name", value=name, key=f"name_{item_id}")
+                        new_exp = st.date_input("Expiration", value=exp_date, key=f"exp_{item_id}")
+                        new_type = st.selectbox("Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"],
+                                                index=["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"].index(food_type),
+                                                key=f"type_{item_id}")
+                        new_amt = st.number_input("Amount", value=amount,
+                                                  step=1.0 if unit == "pcs" else 0.1, key=f"amt_{item_id}")
+                        new_unit = st.selectbox("Unit", ["kg", "liter", "pcs"],
+                                                index=["kg", "liter", "pcs"].index(unit),
+                                                key=f"unit_{item_id}")
+
+                        if st.form_submit_button("💾 Save Changes"):
+                            update_item(item_id, new_name, new_exp.strftime("%Y-%m-%d"),
+                                        new_type, new_amt, new_unit)
+                            delete_expired_items(user_id)
+                            st.session_state[edit_key] = False
+                            st.success("✅ Item updated.")
+                            st.rerun()
+
+                    if col_btn1.button("❌ Cancel", key=f"cancel_{item_id}"):
+                        st.session_state[edit_key] = False
+                        st.rerun()
+
+                if col_btn2.button("🗑️ Delete", key=f"delete_{item_id}"):
+                    delete_item(item_id)
+                    st.rerun()
 
     # --- WhatsApp Summary ---
     st.markdown("### 📤 Send Summary to WhatsApp")
     if st.button("📲 Send WhatsApp Inventory Summary"):
         try:
-            expiring_soon = [name for (_, name, exp, _, _, _) in items if (datetime.strptime(exp, "%Y-%m-%d").date() - date.today()).days <= 2]
-            msg = (
-                f"You currently have {len(items)} items.\n"
-                f"Expiring soon: {', '.join(expiring_soon) if expiring_soon else 'None'}"
-            )
+            expiring_soon = [name for (_, name, exp, _, _, _) in items if
+                             (datetime.strptime(exp, "%Y-%m-%d").date() - date.today()).days <= 2]
+            msg = f"You currently have {len(items)} items.\\nExpiring soon: {', '.join(expiring_soon) if expiring_soon else 'None'}"
             sid = send_whatsapp_message(msg)
             st.success(f"✅ WhatsApp message sent! SID: {sid}")
         except Exception as e:
