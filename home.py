@@ -2,6 +2,7 @@ import streamlit as st
 from db import create_user, authenticate_user
 
 def home():
+    st.set_page_config(page_title="Login | Smart Inventory", page_icon="🔐")
     st.title("🏠 Welcome to Smart Inventory Manager")
 
     tab1, tab2 = st.tabs(["Login 🔐", "Register 📝"])
@@ -21,6 +22,9 @@ def home():
                 st.session_state["name"] = user[2]
                 st.session_state["authenticated"] = True
                 st.success(f"✅ Welcome back, {user[2]}")
+
+                # 🔁 Immediately redirect to real homepage
+                st.switch_page("CalendarView.py")
             else:
                 st.error("❌ Invalid phone number or password.")
 
