@@ -1,13 +1,13 @@
 import streamlit as st
 import sqlite3
 from datetime import datetime, date
-from whatsapp_utils import send_whatsapp_message  # ✅ NEW
+from whatsapp_utils import send_whatsapp_message
 
 # --- DB Connection ---
 def get_connection():
     return sqlite3.connect("inventory.db")
 
-# --- Add Inventory Item ---
+# --- Core DB Functions ---
 def add_item(user_id, name, expiration, food_type, amount, unit):
     conn = get_connection()
     cursor = conn.cursor()
@@ -18,7 +18,6 @@ def add_item(user_id, name, expiration, food_type, amount, unit):
     conn.commit()
     conn.close()
 
-# --- Get User Inventory Items ---
 def get_user_items(user_id):
     conn = get_connection()
     cursor = conn.cursor()
@@ -27,7 +26,6 @@ def get_user_items(user_id):
     conn.close()
     return items
 
-# --- Delete Expired Items ---
 def delete_expired_items(user_id):
     today = date.today().strftime("%Y-%m-%d")
     conn = get_connection()
@@ -36,7 +34,6 @@ def delete_expired_items(user_id):
     conn.commit()
     conn.close()
 
-# --- Delete Single Item ---
 def delete_item(item_id):
     conn = get_connection()
     cursor = conn.cursor()
@@ -44,7 +41,6 @@ def delete_item(item_id):
     conn.commit()
     conn.close()
 
-# --- Update Inventory Item ---
 def update_item(item_id, name, expiration, food_type, amount, unit):
     conn = get_connection()
     cursor = conn.cursor()
@@ -57,42 +53,45 @@ def update_item(item_id, name, expiration, food_type, amount, unit):
 
 # --- Inventory UI Page ---
 def inventory():
-    st.title("📦 Your Inventory")
+    st.markdown("<h2 style='text-align:center;'>📦 Smart Inventory Manager</h2>", unsafe_allow_html=True)
 
     if "user_id" not in st.session_state:
         st.warning("⚠️ Please login first from Home page.")
         st.stop()
 
     user_id = st.session_state["user_id"]
-
-    # Delete expired items every time page loads
     delete_expired_items(user_id)
+    items = get_user_items(user_id)
 
-    # --- Add Food Form ---
-    with st.form("add_food_form"):
-        name = st.text_input("Food Name", max_chars=50)
-        expiration = st.date_input("Expiration Date", min_value=date.today())
-        food_type = st.selectbox("Food Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"])
-        amount = st.number_input("Amount", min_value=0.1, step=1.0)
-        unit = st.selectbox("Unit", ["kg", "liter", "pcs"])
-        submitted = st.form_submit_button("Add to Inventory")
+    # --- Add Food Form Section ---
+    st.markdown("### ➕ Add New Item")
+    with st.form("add_food_form", clear_on_submit=True):
+        col1, col2, col3 = st.columns([2, 1, 1])
+        name = col1.text_input("Food Name", max_chars=50)
+        expiration = col2.date_input("Expiration Date", min_value=date.today())
+        food_type = col3.selectbox("Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"])
 
+        col4, col5 = st.columns([1, 1])
+        amount = col4.number_input("Amount", min_value=0.1, step=1.0)
+        unit = col5.selectbox("Unit", ["kg", "liter", "pcs"])
+
+        submitted = st.form_submit_button("✅ Add to Inventory")
         if submitted:
             if not name.strip():
                 st.warning("⚠️ Food name is required.")
             else:
                 add_item(user_id, name, expiration.strftime("%Y-%m-%d"), food_type, amount, unit)
-                st.success(f"✅ {amount} {unit} of {name} added successfully!")
+                st.success(f"✅ {amount} {unit} of {name} added!")
                 st.rerun()
 
-    # --- Display Current Inventory ---
-    st.subheader("📦 Current Inventory")
-    items = get_user_items(user_id)
-
+    # --- Inventory List Section ---
+    st.markdown("### 📋 Current Inventory")
     if not items:
-        st.info("Inventory is currently empty.")
+        st.info("🪹 Your inventory is empty.")
     else:
-        for idx, (item_id, name, expiration, food_type, amount, unit) in enumerate(items, start=1):
+        colA, colB = st.columns(2)
+        for idx, (item_id, name, expiration, food_type, amount, unit) in enumerate(items):
+            col = colA if idx % 2 == 0 else colB
             exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
             days_left = (exp_date - date.today()).days
 
@@ -103,28 +102,19 @@ def inventory():
             else:
                 status = "🟢 Fresh"
 
-            with st.expander(f"**{idx}. {name}** | {amount} {unit} | {status}"):
-                new_name = st.text_input(f"Edit Name {idx}", name, key=f"name{idx}")
-                new_exp = st.date_input(f"Edit Expiration {idx}", exp_date, key=f"exp{idx}")
-                new_type = st.selectbox(f"Edit Type {idx}", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"], index=["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"].index(food_type), key=f"type{idx}")
-                new_amt = st.number_input(f"Edit Amount {idx}", value=amount, step=1.0, key=f"amt{idx}")
-                new_unit = st.selectbox(f"Edit Unit {idx}", ["kg", "liter", "pcs"], index=["kg", "liter", "pcs"].index(unit), key=f"unit{idx}")
+            with col:
+                st.markdown(f"""
+                <div style='background-color:#2a2a2a;padding:15px 20px;border-radius:15px;margin-bottom:20px'>
+                    <h4 style='margin:0;color:#FAFAFA'>{name} <span style='color:gray;font-size:14px;'>({food_type})</span></h4>
+                    <p style='margin:4px 0;color:#CCC;'>📅 Expires: <b>{expiration}</b></p>
+                    <p style='margin:4px 0;color:#CCC;'>💧 Amount: <b>{amount} {unit}</b></p>
+                    <p style='margin:4px 0;color:#CCC;'>📌 Status: <b>{status}</b></p>
+                </div>
+                """, unsafe_allow_html=True)
 
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button(f"💾 Save {idx}"):
-                        update_item(item_id, new_name, new_exp.strftime("%Y-%m-%d"), new_type, new_amt, new_unit)
-                        st.success("Item updated successfully.")
-                        st.rerun()
-                with col2:
-                    if st.button(f"🗑️ Delete {idx}"):
-                        delete_item(item_id)
-                        st.warning("Item deleted.")
-                        st.rerun()
-
-    # --- WhatsApp Summary ---
-    st.subheader("📤 WhatsApp Summary")
-    if st.button("Send WhatsApp Inventory Summary"):
+    # --- WhatsApp Summary Section ---
+    st.markdown("### 📤 Send Inventory Summary to WhatsApp")
+    if st.button("📲 Send Summary Now"):
         try:
             expiring_soon = [name for (_, name, exp, _, _, _) in items if (datetime.strptime(exp, "%Y-%m-%d").date() - date.today()).days <= 2]
             msg = (
