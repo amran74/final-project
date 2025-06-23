@@ -6,7 +6,7 @@ def auth_page():
 
     st.title("🔐 Welcome to Smart Food Inventory")
 
-    # Tabs
+    # --- Tabs ---
     tab1, tab2 = st.tabs(["Login 🔑", "Register 📝"])
 
     # --- Login Tab ---
@@ -32,7 +32,7 @@ def auth_page():
                 st.error("❌ Invalid phone number or password.")
 
         if forgot_clicked:
-            st.warning("🔐 Forgot password feature is coming soon.")
+            st.warning("🔐 Forgot password feature coming soon.")
 
     # --- Register Tab ---
     with tab2:
