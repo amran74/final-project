@@ -9,7 +9,7 @@ def create_tables():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Users Table (with name)
+    # Users Table with name
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,20 +36,28 @@ def create_tables():
     conn.commit()
     conn.close()
 
-# --- Create User (with name) ---
+# --- Create User (with existence check) ---
 def create_user(phone, password, name):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Check if user exists
+    cursor.execute("SELECT id FROM users WHERE phone = ?", (phone,))
+    if cursor.fetchone():
+        conn.close()
+        return False  # Already registered
+
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
         cursor.execute("INSERT INTO users (phone, password, name) VALUES (?, ?, ?)", (phone, password, name))
         conn.commit()
         conn.close()
         return True
     except Exception as e:
-        print(f"Error: {e}")
+        print("❌ Error creating user:", e)
+        conn.close()
         return False
 
-# --- Authenticate User (returns id, phone, name) ---
+# --- Authenticate User ---
 def authenticate_user(phone, password):
     conn = get_connection()
     cursor = conn.cursor()
