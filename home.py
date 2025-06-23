@@ -23,8 +23,8 @@ def home():
                 st.session_state["authenticated"] = True
                 st.success(f"✅ Welcome back, {user[2]}")
 
-                # 🔁 Immediately redirect to real homepage
-                st.switch_page("CalendarView.py")
+                # ✅ Use rerun instead of switch_page (for dynamic routing)
+                st.experimental_rerun()
             else:
                 st.error("❌ Invalid phone number or password.")
 
