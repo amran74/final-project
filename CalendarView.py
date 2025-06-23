@@ -3,9 +3,11 @@ from streamlit_calendar import calendar
 import sqlite3
 from datetime import datetime, date
 
+# --- DB Connection ---
 def get_connection():
     return sqlite3.connect("inventory.db")
 
+# --- Get Items ---
 def get_user_items(user_id):
     conn = get_connection()
     cursor = conn.cursor()
@@ -14,6 +16,7 @@ def get_user_items(user_id):
     conn.close()
     return items
 
+# --- Main Calendar Page ---
 def calendar_view():
     st.set_page_config(page_title="Home | Smart Inventory", page_icon="🏡")
 
@@ -22,7 +25,7 @@ def calendar_view():
         return
 
     user_id = st.session_state["user_id"]
-    user_name = st.session_state.get("name", "User")
+    user_name = st.session_state.get("name", "user")
     today = date.today()
     items = get_user_items(user_id)
 
@@ -41,11 +44,10 @@ def calendar_view():
     expired_items = [item for item in items if (datetime.strptime(item[1], "%Y-%m-%d").date() - today).days < 0]
 
     st.markdown("### 📊 Inventory Overview")
-    st.info(f"📦 Total items: **{total_items}**\n\n🟠 Expiring soon: **{len(expiring_soon)}**\n\n🔴 Expired: **{len(expired_items)}**")
-
+    st.info(f"📦 You have **{total_items}** total items.\n\n🟠 **{len(expiring_soon)}** expiring soon.\n\n🔴 **{len(expired_items)}** already expired.")
     st.divider()
 
-    # --- Quick Access Buttons ---
+    # --- Quick Navigation Buttons ---
     st.markdown("### 📂 Quick Access")
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -63,9 +65,9 @@ def calendar_view():
 
     st.divider()
 
-    # --- Collapsible Calendar ---
+    # --- Expiration Calendar ---
     st.markdown("### 📅 Expiration Calendar")
-    with st.expander("📅 Click to show full calendar"):
+    with st.expander("📅 Click to show full calendar", expanded=True):
         events = []
         for name, expiration, food_type in items:
             try:
@@ -85,21 +87,23 @@ def calendar_view():
                     "color": color
                 })
             except Exception as e:
-                st.error(f"❌ Error parsing expiration date for {name}: {expiration}")
+                st.error(f"❌ Skipped broken item: {name} - {expiration}")
 
-        options = {
-            "initialView": "dayGridMonth",
-            "headerToolbar": {
-                "left": "prev,next today",
-                "center": "title",
-                "right": "dayGridMonth,timeGridWeek"
+        if events:
+            options = {
+                "initialView": "dayGridMonth",
+                "headerToolbar": {
+                    "left": "prev,next today",
+                    "center": "title",
+                    "right": "dayGridMonth,timeGridWeek"
+                }
             }
-        }
-
-        calendar(events=events, options=options)
+            calendar(events=events, options=options)
+        else:
+            st.info("🪹 No valid items to display on the calendar.")
 
     st.divider()
 
     # --- Daily Tip ---
     st.markdown("### 💡 Tip of the Day")
-    st.info("✅ Use this dashboard daily to stay ahead of food waste and keep your kitchen under control.")
+    st.info("✅ Use this dashboard daily to stay ahead of food waste and expiration.")
