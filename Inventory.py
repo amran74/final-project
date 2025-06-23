@@ -1,6 +1,7 @@
 import streamlit as st
 import sqlite3
 from datetime import datetime, date
+from whatsapp_utils import send_whatsapp_message  # ✅ NEW
 
 # --- DB Connection ---
 def get_connection():
@@ -56,10 +57,10 @@ def update_item(item_id, name, expiration, food_type, amount, unit):
 
 # --- Inventory UI Page ---
 def inventory():
-    st.title("\U0001F4E6 Your Inventory")
+    st.title("📦 Your Inventory")
 
     if "user_id" not in st.session_state:
-        st.warning("\u26A0\uFE0F Please login first from Home page.")
+        st.warning("⚠️ Please login first from Home page.")
         st.stop()
 
     user_id = st.session_state["user_id"]
@@ -85,7 +86,7 @@ def inventory():
                 st.rerun()
 
     # --- Display Current Inventory ---
-    st.subheader("\U0001F4E6 Current Inventory")
+    st.subheader("📦 Current Inventory")
     items = get_user_items(user_id)
 
     if not items:
@@ -120,3 +121,17 @@ def inventory():
                         delete_item(item_id)
                         st.warning("Item deleted.")
                         st.rerun()
+
+    # --- WhatsApp Summary ---
+    st.subheader("📤 WhatsApp Summary")
+    if st.button("Send WhatsApp Inventory Summary"):
+        try:
+            expiring_soon = [name for (_, name, exp, _, _, _) in items if (datetime.strptime(exp, "%Y-%m-%d").date() - date.today()).days <= 2]
+            msg = (
+                f"You currently have {len(items)} items.\n"
+                f"Expiring soon: {', '.join(expiring_soon) if expiring_soon else 'None'}"
+            )
+            sid = send_whatsapp_message(msg)
+            st.success(f"✅ WhatsApp message sent! SID: {sid}")
+        except Exception as e:
+            st.error(f"❌ Failed to send WhatsApp message: {e}")
