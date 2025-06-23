@@ -11,47 +11,46 @@ st.set_page_config(
     layout="centered"
 )
 
-# --- Pages for logged-in users ---
+# --- Page Mapping ---
 PAGES = {
     "🏡 Home": calendar_view,
     "📦 Inventory": inventory,
     "🤖 AI Assistant": ai_assistant
 }
 
-# --- If not authenticated, force login ---
+# --- Redirect to Login if Not Authenticated ---
 if "authenticated" not in st.session_state or not st.session_state["authenticated"]:
     home()
     st.stop()
 
-# --- Handle quick navigation (from buttons) ---
-nav_target = st.session_state.pop("nav", None)
-if nav_target:
-    if nav_target == "inventory":
+# --- Session-Based Navigation (set in calendar_view) ---
+if st.session_state.get("jump"):
+    st.session_state.pop("jump")
+    target = st.session_state.pop("nav", None)
+    if target == "inventory":
         inventory()
-        st.stop()
-    elif nav_target == "ai":
+    elif target == "ai":
         ai_assistant()
-        st.stop()
-    elif nav_target == "home":
+    elif target == "home":
         home()
-        st.stop()
+    st.stop()
 
-# --- Top Branding Banner ---
+# --- Branding Header ---
 st.markdown("""
     <div style='background-color:#0B0F2A;padding:15px 25px;border-radius:12px;margin-bottom:20px;'>
         <h1 style='color:#00BFFF;text-align:center;margin:0;'>💡 Smart Inventory</h1>
     </div>
 """, unsafe_allow_html=True)
 
-# --- Personalized Welcome Banner ---
-user_name = st.session_state.get("name", st.session_state.get("phone", "user"))
+# --- Welcome Message ---
+user_name = st.session_state.get("name", st.session_state.get("phone", "User"))
 st.markdown(f"""
     <div style='border: 2px solid #00BFFF; border-radius: 10px; padding: 10px 20px; margin-bottom: 20px; background: linear-gradient(90deg, #0B0F2A, #1A1F3C);'>
         <p style='font-size:16px;color:#00BFFF;'>👋 Welcome back, <b>{user_name}</b></p>
     </div>
 """, unsafe_allow_html=True)
 
-# --- Main Navigation Bar ---
+# --- Top Navigation Menu ---
 st.markdown("### 🔍 Navigate")
 selection = st.radio("", list(PAGES.keys()), horizontal=True)
 
