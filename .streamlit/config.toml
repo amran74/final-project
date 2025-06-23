@@ -1,8 +1,7 @@
-
 [theme]
-base="dark"
-primaryColor="#FF5A5F"
-backgroundColor="#1E1E1E"
-secondaryBackgroundColor="#262730"
-textColor="#FAFAFA"
-font="sans serif"
+base = "dark"
+primaryColor = "#00BFFF"               # Deep Sky Blue
+backgroundColor = "#0B0F2A"            # Deep Navy Blue
+secondaryBackgroundColor = "#1A1F3C"   # Slightly lighter blue
+textColor = "#EAEAEA"
+font = "sans serif"

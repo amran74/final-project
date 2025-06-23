@@ -1,14 +1,14 @@
 import streamlit as st
 from CalendarView import calendar_view
 
-# --- Set page config immediately (must be first Streamlit command) ---
+# --- Set page config ---
 st.set_page_config(
     page_title="Smart Inventory Manager",
     page_icon="🍴",
     layout="centered"
 )
 
-# --- Now import other pages AFTER setting config ---
+# --- Import pages after config ---
 from home import home
 from Inventory import inventory
 from AI_Assistant import ai_assistant
@@ -18,21 +18,35 @@ PAGES = {
     "🏠 Home": home,
     "📦 Inventory": inventory,
     "🤖 AI Assistant": ai_assistant,
-    "📅 Calendar View": calendar_view  # ✅ Fixed: added missing comma above
+    "📅 Calendar View": calendar_view
 }
 
-# --- Sidebar ---
-st.sidebar.title("📋 Navigation")
-selection = st.sidebar.radio("Go to:", list(PAGES.keys()))
+# --- Top Banner / Branding ---
+st.markdown("""
+    <div style='background-color:#0B0F2A;padding:15px 25px;border-radius:12px;margin-bottom:20px;'>
+        <h1 style='color:#00BFFF;text-align:center;margin:0;'>💡 Smart Inventory</h1>
+    </div>
+""", unsafe_allow_html=True)
 
-# --- Page Access Control ---
+# --- Surprise: Welcome Banner if Logged In ---
+if "authenticated" in st.session_state and st.session_state["authenticated"]:
+    user = st.session_state.get("phone", "user")
+    st.markdown(f"""
+    <div style='border: 2px solid #00BFFF; border-radius: 10px; padding: 10px 20px; margin-bottom: 20px; background: linear-gradient(90deg, #0B0F2A, #1A1F3C);'>
+        <p style='font-size:16px;color:#00BFFF;'>👋 Welcome back, <b>{user}</b> — let’s manage your food like a pro!</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# --- Navigation Bar (Top instead of Sidebar) ---
+st.markdown("### 🔍 Navigate")
+selection = st.radio("", list(PAGES.keys()), horizontal=True)
+
+# --- Access Control ---
 if selection != "🏠 Home":
     if "authenticated" not in st.session_state or not st.session_state["authenticated"]:
         st.warning("⚠️ Please login first from Home page.")
         home()
     else:
-        page = PAGES[selection]
-        page()
+        PAGES[selection]()
 else:
-    page = PAGES[selection]
-    page()
+    PAGES[selection]()
