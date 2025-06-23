@@ -5,6 +5,11 @@ def home():
     st.set_page_config(page_title="Login | Smart Inventory", page_icon="🔐")
     st.title("🏠 Welcome to Smart Inventory Manager")
 
+    # ✅ Safe reroute if login was just completed
+    if st.session_state.get("reroute_now"):
+        st.session_state.pop("reroute_now")
+        st.experimental_rerun()
+
     tab1, tab2 = st.tabs(["Login 🔐", "Register 📝"])
 
     # ------------------- Login -------------------
@@ -21,10 +26,8 @@ def home():
                 st.session_state["phone"] = user[1]
                 st.session_state["name"] = user[2]
                 st.session_state["authenticated"] = True
+                st.session_state["reroute_now"] = True  # ✅ flag rerun for next frame
                 st.success(f"✅ Welcome back, {user[2]}")
-
-                # ✅ Use rerun instead of switch_page (for dynamic routing)
-                st.experimental_rerun()
             else:
                 st.error("❌ Invalid phone number or password.")
 
