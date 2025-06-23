@@ -22,7 +22,7 @@ def calendar_view():
         return
 
     user_id = st.session_state["user_id"]
-    user_name = st.session_state.get("name", "user")
+    user_name = st.session_state.get("name", "User")
     today = date.today()
     items = get_user_items(user_id)
 
@@ -41,7 +41,7 @@ def calendar_view():
     expired_items = [item for item in items if (datetime.strptime(item[1], "%Y-%m-%d").date() - today).days < 0]
 
     st.markdown("### 📊 Inventory Overview")
-    st.info(f"📦 You have **{total_items}** total items.\n\n🟠 **{len(expiring_soon)}** expiring soon.\n\n🔴 **{len(expired_items)}** already expired.")
+    st.info(f"📦 Total items: **{total_items}**\n\n🟠 Expiring soon: **{len(expiring_soon)}**\n\n🔴 Expired: **{len(expired_items)}**")
 
     st.divider()
 
@@ -51,15 +51,15 @@ def calendar_view():
     with col1:
         if st.button("📦 Go to Inventory"):
             st.session_state["nav"] = "inventory"
-            st.experimental_rerun()
+            st.session_state["jump"] = True
     with col2:
         if st.button("🤖 Open Assistant"):
             st.session_state["nav"] = "ai"
-            st.experimental_rerun()
+            st.session_state["jump"] = True
     with col3:
         if st.button("⚙️ Settings / Login"):
             st.session_state["nav"] = "home"
-            st.experimental_rerun()
+            st.session_state["jump"] = True
 
     st.divider()
 
@@ -102,4 +102,4 @@ def calendar_view():
 
     # --- Daily Tip ---
     st.markdown("### 💡 Tip of the Day")
-    st.info("✅ Use this dashboard daily to stay ahead of food waste and expiration.")
+    st.info("✅ Use this dashboard daily to stay ahead of food waste and keep your kitchen under control.")
