@@ -51,7 +51,7 @@ def update_item(item_id, name, expiration, food_type, amount, unit):
     conn.commit()
     conn.close()
 
-# --- Inventory UI Page ---
+# --- Inventory Page ---
 def inventory():
     st.markdown("<h2 style='text-align:center; color:#FF5A5F;'>📦 Smart Inventory Manager</h2>", unsafe_allow_html=True)
 
@@ -84,9 +84,8 @@ def inventory():
                 st.success(f"✅ {amount} {unit} of {name} added!")
                 st.rerun()
 
-    # --- Inventory List ---
+    # --- Inventory Display ---
     st.markdown("### 📋 Your Inventory")
-
     if not items:
         st.info("🪹 Your inventory is empty.")
     else:
@@ -117,12 +116,23 @@ def inventory():
                     </div>
                     """, unsafe_allow_html=True)
 
-                    btn1, btn2 = st.columns([1, 1])
-                    if btn1.button("✏️ Edit", key=f"edit_{item_id}"):
-                        with st.form(f"edit_form_{item_id}", clear_on_submit=False):
+                    btn1, btn2, btn3 = st.columns([1, 1, 1])
+
+                    # ➕ Quick Add
+                    if btn1.button("➕", key=f"plus_{item_id}"):
+                        increment = 1.0 if unit == "pcs" else 0.1
+                        new_amount = round(amount + increment, 2)
+                        update_item(item_id, name, expiration, food_type, new_amount, unit)
+                        st.success(f"Added {increment} {unit} to {name}")
+                        st.rerun()
+
+                    # ✏️ Edit Form
+                    if btn2.button("✏️ Edit", key=f"edit_{item_id}"):
+                        with st.form(f"edit_form_{item_id}"):
                             new_name = st.text_input("Name", value=name)
                             new_exp = st.date_input("Expiration", value=exp_date)
-                            new_type = st.selectbox("Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"], index=["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"].index(food_type))
+                            new_type = st.selectbox("Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"],
+                                                    index=["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"].index(food_type))
                             new_amt = st.number_input("Amount", value=amount)
                             new_unit = st.selectbox("Unit", ["kg", "liter", "pcs"], index=["kg", "liter", "pcs"].index(unit))
                             if st.form_submit_button("💾 Save Changes"):
@@ -130,7 +140,8 @@ def inventory():
                                 st.success("✅ Item updated.")
                                 st.rerun()
 
-                    if btn2.button("🗑️ Delete", key=f"delete_{item_id}"):
+                    # 🗑️ Delete
+                    if btn3.button("🗑️ Delete", key=f"delete_{item_id}"):
                         delete_item(item_id)
                         st.warning("🗑️ Item deleted.")
                         st.rerun()
