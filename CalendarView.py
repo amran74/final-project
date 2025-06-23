@@ -2,6 +2,7 @@ import streamlit as st
 from streamlit_calendar import calendar
 import sqlite3
 from datetime import datetime, date
+from streamlit.runtime.scriptrunner import rerun  # ✅ Correct rerun for Streamlit v1.30+
 
 def get_connection():
     return sqlite3.connect("inventory.db")
@@ -51,19 +52,19 @@ def calendar_view():
     with col1:
         if st.button("📦 Go to Inventory"):
             st.session_state["nav"] = "inventory"
-            st.experimental_rerun()
+            rerun()
     with col2:
         if st.button("🤖 Open Assistant"):
             st.session_state["nav"] = "ai"
-            st.experimental_rerun()
+            rerun()
     with col3:
         if st.button("⚙️ Settings / Login"):
             st.session_state["nav"] = "home"
-            st.experimental_rerun()
+            rerun()
 
     st.divider()
 
-    # --- Calendar View (minimized in expander) ---
+    # --- Collapsible Calendar ---
     st.markdown("### 📅 Expiration Calendar")
     with st.expander("📅 Click to show full calendar"):
         events = []
@@ -102,4 +103,4 @@ def calendar_view():
 
     # --- Daily Tip ---
     st.markdown("### 💡 Tip of the Day")
-    st.info("✅ Check this dashboard daily to stay ahead of food waste and stay organized.")
+    st.info("✅ Use this dashboard daily to stay ahead of food waste and expiration.")
