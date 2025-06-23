@@ -9,7 +9,7 @@ def create_tables():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Users Table (now includes name)
+    # Users Table (with name)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,7 +36,7 @@ def create_tables():
     conn.commit()
     conn.close()
 
-# --- Create User ---
+# --- Create User (with name) ---
 def create_user(phone, password, name):
     try:
         conn = get_connection()
@@ -49,7 +49,7 @@ def create_user(phone, password, name):
         print(f"Error: {e}")
         return False
 
-# --- Authenticate User ---
+# --- Authenticate User (returns id, phone, name) ---
 def authenticate_user(phone, password):
     conn = get_connection()
     cursor = conn.cursor()
@@ -62,10 +62,10 @@ def authenticate_user(phone, password):
 def update_item(item_id, name, expiration, food_type, amount, unit):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute('''
+    cursor.execute("""
         UPDATE inventory
         SET name = ?, expiration = ?, type = ?, amount = ?, unit = ?
         WHERE id = ?
-    ''', (name, expiration, food_type, amount, unit, item_id))
+    """, (name, expiration, food_type, amount, unit, item_id))
     conn.commit()
     conn.close()
