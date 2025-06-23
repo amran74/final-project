@@ -45,56 +45,61 @@ def calendar_view():
 
     st.divider()
 
-    # --- Navigation Menu ---
+    # --- Quick Access Buttons ---
     st.markdown("### 📂 Quick Access")
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.page_link("Inventory.py", label="📦 Inventory")
+        if st.button("📦 Go to Inventory"):
+            st.session_state["nav"] = "inventory"
+            st.experimental_rerun()
     with col2:
-        st.page_link("AI_Assistant.py", label="🤖 Assistant")
+        if st.button("🤖 Open Assistant"):
+            st.session_state["nav"] = "ai"
+            st.experimental_rerun()
     with col3:
-        st.page_link("home.py", label="⚙️ Settings/Login", disabled=not st.session_state.get("authenticated"))
+        if st.button("⚙️ Settings / Login"):
+            st.session_state["nav"] = "home"
+            st.experimental_rerun()
 
     st.divider()
 
-    # --- Calendar View ---
+    # --- Calendar View (minimized in expander) ---
     st.markdown("### 📅 Expiration Calendar")
+    with st.expander("📅 Click to show full calendar"):
+        events = []
+        for name, expiration, food_type in items:
+            try:
+                exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
+                days_left = (exp_date - today).days
 
-    events = []
-    for name, expiration, food_type in items:
-        try:
-            exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
-            days_left = (exp_date - today).days
+                color = "green"
+                if days_left < 0:
+                    color = "red"
+                elif days_left <= 2:
+                    color = "orange"
 
-            color = "green"
-            if days_left < 0:
-                color = "red"
-            elif days_left <= 2:
-                color = "orange"
+                events.append({
+                    "title": f"{name} ({food_type})",
+                    "start": expiration,
+                    "end": expiration,
+                    "color": color
+                })
+            except Exception as e:
+                st.error(f"❌ Error parsing expiration date for {name}: {expiration}")
 
-            events.append({
-                "title": f"{name} ({food_type})",
-                "start": expiration,
-                "end": expiration,
-                "color": color
-            })
-        except Exception as e:
-            st.error(f"❌ Error parsing expiration date for {name}: {expiration}")
-
-    options = {
-        "initialView": "dayGridMonth",
-        "headerToolbar": {
-            "left": "prev,next today",
-            "center": "title",
-            "right": "dayGridMonth,timeGridWeek"
+        options = {
+            "initialView": "dayGridMonth",
+            "headerToolbar": {
+                "left": "prev,next today",
+                "center": "title",
+                "right": "dayGridMonth,timeGridWeek"
+            }
         }
-    }
 
-    calendar(events=events, options=options)
+        calendar(events=events, options=options)
 
     st.divider()
 
     # --- Daily Tip ---
     st.markdown("### 💡 Tip of the Day")
-    st.info("Track your items regularly and set reminders for food close to expiration!")
-
+    st.info("✅ Check this dashboard daily to stay ahead of food waste and stay organized.")
