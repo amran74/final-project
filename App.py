@@ -1,5 +1,5 @@
 import streamlit as st
-from CalendarView import Calendar_view
+from CalendarView import calendar_view
 from home import home
 from Inventory import inventory
 from AI_Assistant import ai_assistant
