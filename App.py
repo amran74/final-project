@@ -15,7 +15,8 @@ st.set_page_config(
 PAGES = {
     "🏡 Home": calendar_view,
     "📦 Inventory": inventory,
-    "🤖 AI Assistant": ai_assistant
+    "🤖 AI Assistant": ai_assistant,
+    "📊 Dashboard": dashboard
 }
 
 # --- Login First ---

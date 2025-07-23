@@ -33,7 +33,7 @@ def generate_tip_of_the_day(user_id):
         )
         prompt = (
             f"Here is a user's food inventory:\n{inventory_summary}\n\n"
-            "Give ONE short, practical daily tip to help them avoid food waste, save money, or plan meals wisely:"
+            "Give ONE short, practical daily tip to help them avoid food waste, save money, or plan meals wisely, be little chicky:"
         )
 
         try:
@@ -82,23 +82,31 @@ def calendar_view():
     st.info(f"📦 You have **{total_items}** total items.\n\n🟠 **{len(expiring_soon)}** expiring soon.\n\n🔴 **{len(expired_items)}** already expired.")
     st.divider()
 
-    # --- Quick Navigation Buttons ---
-    st.markdown("### 📂 Quick Access")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("📦 Go to Inventory"):
-            st.session_state["nav"] = "inventory"
-            st.session_state["jump"] = True
-    with col2:
-        if st.button("🤖 Open Assistant"):
-            st.session_state["nav"] = "ai"
-            st.session_state["jump"] = True
-    with col3:
-        if st.button("⚙️ Settings / Login"):
-            st.session_state["nav"] = "home"
-            st.session_state["jump"] = True
+   # --- Quick Navigation Buttons ---
+st.markdown("### 📂 Quick Access")
+col1, col2, col3, col4 = st.columns(4)
 
-    st.divider()
+with col1:
+    if st.button("📦 Go to Inventory"):
+        st.session_state["nav"] = "inventory"
+        st.session_state["jump"] = True
+
+with col2:
+    if st.button("🤖 Open Assistant"):
+        st.session_state["nav"] = "ai"
+        st.session_state["jump"] = True
+
+with col3:
+    if st.button("📊 View Dashboard"):
+        st.session_state["nav"] = "dashboard"
+        st.session_state["jump"] = True
+
+with col4:
+    if st.button("⚙️ Settings / Login"):
+        st.session_state["nav"] = "home"
+        st.session_state["jump"] = True
+
+st.divider()
 
     # --- Expiration Calendar ---
     st.markdown("### 📅 Expiration Calendar")
