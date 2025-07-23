@@ -2,6 +2,7 @@ import streamlit as st
 from streamlit_calendar import calendar
 import sqlite3
 from datetime import datetime, date
+import openai
 
 # --- DB Connection ---
 def get_connection():
@@ -15,6 +16,40 @@ def get_user_items(user_id):
     items = cursor.fetchall()
     conn.close()
     return items
+
+# --- Generate AI Tip ---
+def generate_tip_of_the_day(user_id):
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    if st.session_state.get("last_tip_date") == today:
+        return st.session_state.get("tip_of_the_day")
+
+    items = get_user_items(user_id)
+    if not items:
+        tip = "🧊 You have no items. Add some to get smart daily tips!"
+    else:
+        inventory_summary = "\n".join(
+            [f"{name} ({type_}), expires on {expiration}" for name, expiration, type_ in items]
+        )
+        prompt = (
+            f"Here is a user's food inventory:\n{inventory_summary}\n\n"
+            "Give ONE short, practical daily tip to help them avoid food waste, save money, or plan meals wisely:"
+        )
+
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=70,
+                temperature=0.6
+            )
+            tip = response.choices[0].message.content.strip()
+        except openai.error.OpenAIError:
+            tip = "⚠️ Could not fetch a tip today. Try again later."
+
+    st.session_state["last_tip_date"] = today
+    st.session_state["tip_of_the_day"] = tip
+    return tip
 
 # --- Main Calendar Page ---
 def calendar_view():
@@ -106,4 +141,5 @@ def calendar_view():
 
     # --- Daily Tip ---
     st.markdown("### 💡 Tip of the Day")
-    st.info("✅ Use this dashboard daily to stay ahead of food waste and expiration.")
+    tip = generate_tip_of_the_day(user_id)
+    st.success(tip)
