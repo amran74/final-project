@@ -71,7 +71,7 @@ def inventory():
         expiration = col2.date_input("Expiration Date", min_value=date.today())
         food_type = col3.selectbox("Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"])
         col4, col5 = st.columns([1, 1])
-        amount = col4.number_input("Amount", min_value=0, step=1.0)
+        amount = col4.number_input("Amount", min_value=0.0, step=1.0)  # 🛠️ FIXED: float for compatibility
         unit = col5.selectbox("Unit", ["kg", "liter", "pcs"])
 
         if st.form_submit_button("✅ Add to Inventory"):
@@ -158,7 +158,7 @@ def inventory():
         try:
             expiring_soon = [name for (_, name, exp, _, _, _) in items if
                              (datetime.strptime(exp, "%Y-%m-%d").date() - date.today()).days <= 2]
-            msg = f"You currently have {len(items)} items.\\nExpiring soon: {', '.join(expiring_soon) if expiring_soon else 'None'}"
+            msg = f"You currently have {len(items)} items.\nExpiring soon: {', '.join(expiring_soon) if expiring_soon else 'None'}"
             sid = send_whatsapp_message(msg)
             st.success(f"✅ WhatsApp message sent! SID: {sid}")
         except Exception as e:
