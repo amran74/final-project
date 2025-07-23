@@ -3,6 +3,7 @@ from CalendarView import calendar_view
 from home import home
 from Inventory import inventory
 from AI_Assistant import ai_assistant
+from dashboard import dashboard  # ✅ Don't forget this line
 
 # --- Page Config ---
 st.set_page_config(
@@ -16,7 +17,7 @@ PAGES = {
     "🏡 Home": calendar_view,
     "📦 Inventory": inventory,
     "🤖 AI Assistant": ai_assistant,
-    "📊 Dashboard": dashboard
+    "📊 Dashboard": dashboard  # ✅ Make sure it's registered here
 }
 
 # --- Login First ---
@@ -34,6 +35,8 @@ if st.session_state.get("jump"):
         ai_assistant()
     elif target == "home":
         calendar_view()
+    elif target == "dashboard":  # ✅ Needed for button navigation
+        dashboard()
     st.stop()
 
 # --- Branding Header ---
