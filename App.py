@@ -18,12 +18,12 @@ PAGES = {
     "🤖 AI Assistant": ai_assistant
 }
 
-# --- Redirect to Login if Not Authenticated ---
+# --- Login First ---
 if "authenticated" not in st.session_state or not st.session_state["authenticated"]:
     home()
     st.stop()
 
-# --- Session-Based Navigation (set in calendar_view) ---
+# --- Handle Redirect Flags ---
 if st.session_state.get("jump"):
     st.session_state.pop("jump")
     target = st.session_state.pop("nav", None)
@@ -32,7 +32,7 @@ if st.session_state.get("jump"):
     elif target == "ai":
         ai_assistant()
     elif target == "home":
-        home()
+        calendar_view()
     st.stop()
 
 # --- Branding Header ---
@@ -50,7 +50,7 @@ st.markdown(f"""
     </div>
 """, unsafe_allow_html=True)
 
-# --- Top Navigation Menu ---
+# --- Navigation Bar ---
 st.markdown("### 🔍 Navigate")
 selection = st.radio("", list(PAGES.keys()), horizontal=True)
 

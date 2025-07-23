@@ -71,7 +71,7 @@ def inventory():
         expiration = col2.date_input("Expiration Date", min_value=date.today())
         food_type = col3.selectbox("Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"])
         col4, col5 = st.columns([1, 1])
-        amount = col4.number_input("Amount", min_value=0.1, step=1.0)
+        amount = col4.number_input("Amount", min_value=0, step=1.0)
         unit = col5.selectbox("Unit", ["kg", "liter", "pcs"])
 
         if st.form_submit_button("✅ Add to Inventory"):
