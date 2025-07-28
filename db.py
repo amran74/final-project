@@ -20,7 +20,7 @@ def create_tables():
         )
     ''')
 
-    # --- Inventory Table with usage & expiry tracking ---
+    # --- Inventory Table with full tracking ---
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS inventory (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,11 +34,12 @@ def create_tables():
             expired_count INTEGER DEFAULT 0,
             last_reset_month TEXT DEFAULT '',
             stable INTEGER DEFAULT 0,
+            price_per_unit REAL DEFAULT 0.0,
             FOREIGN KEY(user_id) REFERENCES users(id)
         )
     ''')
 
-    # --- Optional: Usage log for future analytics ---
+    # --- Usage Log (optional for future analytics) ---
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS usage_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +58,6 @@ def create_user(phone, password, name):
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Check if user exists
     cursor.execute("SELECT id FROM users WHERE phone = ?", (phone,))
     if cursor.fetchone():
         conn.close()
@@ -117,5 +117,5 @@ def reset_monthly_counters():
     conn.commit()
     conn.close()
 
-# --- Ensure tables are created on import ---
+# --- Ensure tables are created when app starts ---
 create_tables()
