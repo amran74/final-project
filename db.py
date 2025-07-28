@@ -32,14 +32,14 @@ def create_tables():
             unit TEXT DEFAULT 'pcs',
             used_count INTEGER DEFAULT 0,
             expired_count INTEGER DEFAULT 0,
-            last_reset_month TEXT DEFAULT '',
+            last_used_month TEXT DEFAULT '',
             stable INTEGER DEFAULT 0,
             price_per_unit REAL DEFAULT 0.0,
             FOREIGN KEY(user_id) REFERENCES users(id)
         )
     ''')
 
-    # --- Usage Log (optional for future analytics) ---
+    # --- Usage Log Table ---
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS usage_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,7 +101,7 @@ def reset_monthly_counters():
 
     current_month = date.today().strftime("%Y-%m")
 
-    cursor.execute("SELECT id, last_reset_month FROM inventory")
+    cursor.execute("SELECT id, last_used_month FROM inventory")
     rows = cursor.fetchall()
 
     for item_id, last_month in rows:
@@ -110,7 +110,7 @@ def reset_monthly_counters():
                 UPDATE inventory
                 SET used_count = 0,
                     expired_count = 0,
-                    last_reset_month = ?
+                    last_used_month = ?
                 WHERE id = ?
             """, (current_month, item_id))
 
