@@ -88,7 +88,7 @@ def mark_item_used(item_id, user_id):
 
 # --- Inventory UI ---
 def inventory():
-    st.markdown("<h2 style='text-align:center; color:#FF5A5F;'>\ud83d\udce6 Smart Inventory Manager</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='text-align:center; color:#FF5A5F;'>📦 Smart Inventory Manager</h2>", unsafe_allow_html=True)
 
     if "user_id" not in st.session_state:
         st.warning("\u26a0\ufe0f Please login first from Home page.")
