@@ -1,42 +1,54 @@
-import os
 import sqlite3
+import os
 
-DB_FILE = "inventory.db"
+# Remove existing DB
+if os.path.exists("inventory.db"):
+    os.remove("inventory.db")
 
-# Delete existing DB file if it exists
-if os.path.exists(DB_FILE):
-    os.remove(DB_FILE)
-    print("🧹 Existing database removed.")
-
-# Recreate tables with full schema
-conn = sqlite3.connect(DB_FILE)
+# Recreate it with correct schema
+conn = sqlite3.connect("inventory.db")
 cursor = conn.cursor()
 
-# Users Table (with name)
+# Users table
 cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        phone TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        name TEXT NOT NULL
-    )
+CREATE TABLE users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    name TEXT NOT NULL
+)
 ''')
 
-# Inventory Table
+# Inventory table
 cursor.execute('''
-    CREATE TABLE IF NOT EXISTS inventory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        name TEXT NOT NULL,
-        expiration TEXT NOT NULL,
-        type TEXT,
-        amount REAL DEFAULT 1,
-        unit TEXT DEFAULT 'pcs',
-        FOREIGN KEY(user_id) REFERENCES users(id)
-    )
+CREATE TABLE inventory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    expiration TEXT NOT NULL,
+    type TEXT,
+    amount REAL DEFAULT 1,
+    unit TEXT DEFAULT 'pcs',
+    used_count INTEGER DEFAULT 0,
+    expired_count INTEGER DEFAULT 0,
+    last_reset_month TEXT DEFAULT '',
+    stable INTEGER DEFAULT 0,
+    price_per_unit REAL DEFAULT 0.0,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+)
+''')
+
+# Usage log table
+cursor.execute('''
+CREATE TABLE usage_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    item_id INTEGER,
+    used_date TEXT,
+    used_count INTEGER
+)
 ''')
 
 conn.commit()
 conn.close()
-
-print("✅ New database created with correct structure.")
+print("✅ Database reset and rebuilt.")

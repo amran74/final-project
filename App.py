@@ -17,7 +17,7 @@ if DEBUG_RESET_DB and os.path.exists("inventory.db"):
 create_tables()
 reset_monthly_counters()
 
-# --- Page Config ---
+# --- Page Config (MUST be first Streamlit call) ---
 st.set_page_config(
     page_title="Smart Inventory Manager",
     page_icon="🍴",
