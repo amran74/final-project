@@ -4,9 +4,11 @@ from home import home
 from Inventory import inventory
 from AI_Assistant import ai_assistant
 from dashboard import dashboard  # ✅ Don't forget this line
-from db import reset_monthly_counters
-reset_monthly_counters()
+from db import create_tables, reset_monthly_counters
 
+# --- Ensure DB Tables Exist ---
+create_tables()
+reset_monthly_counters()
 
 # --- Page Config ---
 st.set_page_config(
