@@ -53,11 +53,6 @@ def dashboard():
 
     st.divider()
 
-    # --- AI Recipe Suggestion (Static Placeholder) ---
-    st.markdown("### 🍽️ AI Recipe Suggestions")
-    st.info("🥦 You have zucchini, yogurt, and feta expiring soon. Try stuffed zucchini boats!")
-
-    st.divider()
 
     # --- Category Breakdown (Future Feature) ---
     st.markdown("### 📦 Category Breakdown")
