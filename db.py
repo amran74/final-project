@@ -38,7 +38,7 @@ def create_tables():
         )
     ''')
 
-    # Optional: Create usage log table (can help with reporting later)
+    # --- Optional: Usage log for future analytics ---
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS usage_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +61,7 @@ def create_user(phone, password, name):
     cursor.execute("SELECT id FROM users WHERE phone = ?", (phone,))
     if cursor.fetchone():
         conn.close()
-        return False  # Already registered
+        return False
 
     try:
         cursor.execute("INSERT INTO users (phone, password, name) VALUES (?, ?, ?)", (phone, password, name))
@@ -101,7 +101,6 @@ def reset_monthly_counters():
 
     current_month = date.today().strftime("%Y-%m")
 
-    # Reset counters if month changed
     cursor.execute("SELECT id, last_reset_month FROM inventory")
     rows = cursor.fetchall()
 
@@ -117,3 +116,6 @@ def reset_monthly_counters():
 
     conn.commit()
     conn.close()
+
+# --- Ensure tables are created on import ---
+create_tables()
