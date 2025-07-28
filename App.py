@@ -7,8 +7,15 @@ from dashboard import dashboard
 from db import create_tables, reset_monthly_counters
 import os
 
+# --- ✅ Page Config MUST be first Streamlit command ---
+st.set_page_config(
+    page_title="Smart Inventory Manager",
+    page_icon="🍴",
+    layout="centered"
+)
+
 # --- [Optional] DEBUG MODE: Reset DB (Only for Dev Purposes) ---
-DEBUG_RESET_DB = False  # Set True temporarily to wipe DB
+DEBUG_RESET_DB = False  # Set to True if you want to wipe DB on start
 if DEBUG_RESET_DB and os.path.exists("inventory.db"):
     os.remove("inventory.db")
     print("✅ Deleted old inventory.db for rebuild")
@@ -16,13 +23,6 @@ if DEBUG_RESET_DB and os.path.exists("inventory.db"):
 # --- Ensure DB Schema Exists ---
 create_tables()
 reset_monthly_counters()
-
-# --- Page Config (MUST be first Streamlit call) ---
-st.set_page_config(
-    page_title="Smart Inventory Manager",
-    page_icon="🍴",
-    layout="centered"
-)
 
 # --- Page Mapping ---
 PAGES = {
@@ -32,12 +32,12 @@ PAGES = {
     "📊 Dashboard": dashboard
 }
 
-# --- Auth Gate ---
+# --- Authentication Gate ---
 if "authenticated" not in st.session_state or not st.session_state["authenticated"]:
     home()
     st.stop()
 
-# --- Navigation Jump Handling ---
+# --- Handle Redirect Navigation ---
 if st.session_state.get("jump"):
     st.session_state.pop("jump")
     target = st.session_state.pop("nav", None)
@@ -51,14 +51,14 @@ if st.session_state.get("jump"):
         dashboard()
     st.stop()
 
-# --- UI Header ---
+# --- Header Branding ---
 st.markdown("""
     <div style='background-color:#0B0F2A;padding:15px 25px;border-radius:12px;margin-bottom:20px;'>
         <h1 style='color:#00BFFF;text-align:center;margin:0;'>💡 Smart Inventory</h1>
     </div>
 """, unsafe_allow_html=True)
 
-# --- Welcome Message ---
+# --- Welcome User ---
 user_name = st.session_state.get("name", st.session_state.get("phone", "User"))
 st.markdown(f"""
     <div style='border: 2px solid #00BFFF; border-radius: 10px; padding: 10px 20px; margin-bottom: 20px; background: linear-gradient(90deg, #0B0F2A, #1A1F3C);'>
@@ -70,5 +70,5 @@ st.markdown(f"""
 st.markdown("### 🔍 Navigate")
 selection = st.radio("", list(PAGES.keys()), horizontal=True)
 
-# --- Load Page ---
+# --- Render Selected Page ---
 PAGES[selection]()

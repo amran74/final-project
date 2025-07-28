@@ -1,8 +1,7 @@
 import streamlit as st
 from db import create_user, authenticate_user
 
-# ✅ This must be the FIRST Streamlit command
-st.set_page_config(page_title="Login | Smart Inventory", page_icon="🔐")
+# ❌ DO NOT call st.set_page_config here — it's already done in App.py
 
 def home():
     st.title("🏠 Welcome to Smart Inventory Manager")
