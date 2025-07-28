@@ -1,8 +1,10 @@
 import streamlit as st
 from db import create_user, authenticate_user
 
+# ✅ This must be the FIRST Streamlit command
+st.set_page_config(page_title="Login | Smart Inventory", page_icon="🔐")
+
 def home():
-    st.set_page_config(page_title="Login | Smart Inventory", page_icon="🔐")
     st.title("🏠 Welcome to Smart Inventory Manager")
 
     # ✅ Safe reroute if login was just completed
@@ -10,14 +12,15 @@ def home():
         st.session_state.pop("reroute_now")
         st.experimental_rerun()
 
-    tab1, tab2 = st.tabs(["Login 🔐", "Register 📝"])
+    # --- Tabs for Login / Register ---
+    tab1, tab2 = st.tabs(["🔐 Login", "📝 Register"])
 
     # ------------------- Login -------------------
     with tab1:
         st.subheader("Login to your account")
 
-        phone_login = st.text_input("Phone Number", max_chars=20)
-        password_login = st.text_input("Password", type="password")
+        phone_login = st.text_input("📱 Phone Number", max_chars=20)
+        password_login = st.text_input("🔑 Password", type="password")
 
         if st.button("Login"):
             user = authenticate_user(phone_login, password_login)
@@ -26,7 +29,7 @@ def home():
                 st.session_state["phone"] = user[1]
                 st.session_state["name"] = user[2]
                 st.session_state["authenticated"] = True
-                st.session_state["reroute_now"] = True  # ✅ flag rerun for next frame
+                st.session_state["reroute_now"] = True  # 👈 flag to trigger rerun
                 st.success(f"✅ Welcome back, {user[2]}")
             else:
                 st.error("❌ Invalid phone number or password.")
@@ -35,9 +38,9 @@ def home():
     with tab2:
         st.subheader("Register a new account")
 
-        name_register = st.text_input("Full Name", max_chars=50)
-        phone_register = st.text_input("New Phone Number", max_chars=20)
-        password_register = st.text_input("New Password", type="password")
+        name_register = st.text_input("👤 Full Name", max_chars=50)
+        phone_register = st.text_input("📱 New Phone Number", max_chars=20)
+        password_register = st.text_input("🔑 New Password", type="password")
 
         if st.button("Register"):
             if not name_register.strip() or not phone_register.strip() or not password_register.strip():
