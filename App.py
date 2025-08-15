@@ -21,27 +21,26 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ================== Styles (nav no-wrap + compact, consistent pills) ==================
+# ================== Styles (hard no-wrap + consistent pills) ==================
 st.markdown("""
 <style>
-/* Layout polish */
 .block-container { padding-top: 1rem; }
 .header { background:#0b0f2a; border:1px solid #13203a; border-radius:14px; padding:12px 16px; margin-bottom:12px; }
 .kpi { background:#0f1428; border:1px solid #1e2a44; border-radius:12px; padding:10px 8px; text-align:center; }
 .kpi .val { font-weight:700; font-size:20px; color:#e8f2ff; }
 .kpi .lbl { font-size:12px; color:#9bb3c7; }
 
-/* Tell Streamlit columns that contain nav buttons to stop stretching and wrapping */
+/* Columns containing nav pills should not force wrap */
 div[data-testid="column"] > div:has(.navbtn) {
-  flex: 0 0 auto !important;       /* don't grow or shrink */
+  flex: 0 0 auto !important;
   min-width: 0 !important;
-  white-space: nowrap !important;   /* keep children on one line */
+  white-space: nowrap !important;
 }
 
-/* The nav pill itself */
+/* Base pill */
 .navbtn { display:inline-block; }
 
-/* Streamlit's button gets hard overrides */
+/* Streamlit button hard overrides */
 .navbtn > button,
 div[data-testid="column"] .navbtn > button {
   min-width: 132px !important;
@@ -61,23 +60,27 @@ div[data-testid="column"] .navbtn > button {
   font-size: 14px !important;
   font-weight: 500 !important;
 
-  white-space: nowrap !important;    /* force single line */
+  /* absolutely no wrapping anywhere, ever */
+  white-space: nowrap !important;
+  overflow-wrap: normal !important;
+  word-break: keep-all !important;
+  hyphens: none !important;
+
   overflow: hidden !important;
   text-overflow: ellipsis !important;
   line-height: 1 !important;
 }
 
-/* Inner elements inside Streamlit's button sometimes re-wrap; shut that down */
+/* Inner spans/divs sometimes re-apply wrapping. Silence them. */
 .navbtn > button * {
   white-space: nowrap !important;
+  overflow-wrap: normal !important;
+  word-break: keep-all !important;
+  hyphens: none !important;
 }
 
 /* Active state */
-.navbtn.active > button {
-  background: #0d2744 !important;
-  border-color: #00bfff !important;
-  color: #e8f6ff !important;
-}
+.navbtn.active > button { background:#0d2744 !important; border-color:#00bfff !important; color:#e8f6ff !important; }
 
 /* Hover focus */
 .navbtn > button:hover { border-color:#00bfff !important; }
@@ -121,6 +124,10 @@ def _kpis(user_id: int):
 def _goto(label: str):
     st.session_state["__page"] = label
     st.toast(label.replace("📦","").replace("🏡","").replace("🧠","").replace("🤖","").replace("📊","").strip(), icon="➡️")
+
+def _nbsp(s: str) -> str:
+    """Replace spaces with non-breaking spaces so labels never wrap."""
+    return s.replace(" ", "\u00A0")
 
 # ================== Global post-login interceptor ==================
 if st.session_state.get("just_logged_in"):
@@ -195,14 +202,15 @@ with st.container():
 
     with c:
         st.markdown(f"<div style='text-align:right;color:#9bd7ff;font-weight:600;'>👋 {_user_name()}</div>", unsafe_allow_html=True)
-        # Fixed-width, no-wrap nav (kept in columns, but CSS forces single-line buttons)
+        # Fixed-width, no-wrap nav (CSS handles the no-wrap; we add NBSP to be extra mean)
         n1, n2, n3, n4, n5 = st.columns(5)
         nav_cols = [n1, n2, n3, n4, n5]
         for i, label in enumerate(PAGE_KEYS):
             active = " active" if st.session_state["__page"] == label else ""
             with nav_cols[i]:
                 st.markdown(f"<div class='navbtn{active}'>", unsafe_allow_html=True)
-                if st.button(label, key=f"nav_{i}", use_container_width=True):
+                # non-breaking text
+                if st.button(_nbsp(label), key=f"nav_{i}", use_container_width=False):
                     _goto(label)
                 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -216,7 +224,7 @@ PAGES.get(current, calendar_view)()
 st.markdown(f"""
 <hr style="opacity:0.15">
 <div style="font-size:12px;color:#93a4b4;display:flex;justify-content:space-between;">
-  <div>v1.9 • {date.today().isoformat()} • {current}</div>
+  <div>v2.0 • {date.today().isoformat()} • {current}</div>
   <div>Made with Python and questionable life choices.</div>
 </div>
 """, unsafe_allow_html=True)
