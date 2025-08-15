@@ -1,171 +1,133 @@
+# AI_Assistant.py — Next-Level AI Cooking & Inventory Brain
 import streamlit as st
-import sqlite3
 import openai
-from datetime import datetime
-import json
-import re
+from db import get_connection, use_item, expire_item, update_item
+from datetime import date
 
-# Load OpenAI API key
-openai.api_key = st.secrets["OPENAI_API_KEY"]
+# ======================
+# CONFIG
+# ======================
+MODEL = "gpt-4.1"  # best balance for reasoning + structured output
+openai.api_key = st.secrets.get("OPENAI_API_KEY", "")
 
-# Common pantry items allowed in flexible mode
-PANTRY_ITEMS = ["salt", "sugar", "black pepper", "olive oil", "vegetable oil", "butter", "lemon juice", "baking powder"]
-
-# --- DB connection ---
-def get_connection():
-    return sqlite3.connect("inventory.db")
-
-def get_user_items(user_id):
+# ======================
+# HELPERS
+# ======================
+def _get_inventory(user_id):
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name, expiration, type, amount, unit FROM inventory WHERE user_id = ?", (user_id,))
-    items = cursor.fetchall()
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, name, amount, unit, stable, expiration, price_per_unit
+        FROM inventory WHERE user_id=?
+    """, (user_id,))
+    items = c.fetchall()
     conn.close()
-    return items
+    return [
+        {"id": i[0], "name": i[1], "amount": i[2], "unit": i[3],
+         "stable": bool(i[4]), "expiration": i[5], "price": i[6]}
+        for i in items
+    ]
 
-def update_item_amount(item_id, new_amount):
+def _ai_complete(prompt, sys_prompt="You are a helpful cooking and inventory assistant."):
+    resp = openai.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.7
+    )
+    return resp.choices[0].message.content.strip()
+
+def _add_item(user_id, name, amount=1, unit="pcs", price=0.0, stable=0):
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE inventory SET amount = ? WHERE id = ?", (new_amount, item_id))
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO inventory (user_id, name, amount, unit, price_per_unit, stable, expiration)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, name, amount, unit, price, stable, date.today().isoformat()))
     conn.commit()
     conn.close()
 
-# --- Main Page ---
+# ======================
+# PAGE
+# ======================
 def ai_assistant():
-    st.title("🤖 Smart AI Assistant")
+    st.title("🤖 AI Cooking & Pantry Assistant")
 
     if "user_id" not in st.session_state:
-        st.warning("⚠️ Please login first.")
-        return
+        st.error("Please login first.")
+        st.stop()
 
     user_id = st.session_state["user_id"]
-    items = get_user_items(user_id)
+    inventory = _get_inventory(user_id)
 
-    if not items:
-        st.info("📬 Your inventory is empty.")
-        return
+    tabs = st.tabs(["🍲 AI Recipe Maker", "💡 AI Waste & Cost Insights"])
 
-    item_names = [f"{name} ({type})" for _, name, _, type, _, _ in items]
+    # ==================================
+    # TAB 1 — Recipe Maker
+    # ==================================
+    with tabs[0]:
+        st.subheader("Smart Pantry Recipe Generator")
 
-    st.subheader("🍳 Create a Meal from Your Inventory")
-    selected_items = st.multiselect("Select ingredients:", item_names)
+        mode = st.radio("Use items from:", ["All Items", "Only Pantry (stable=1)", "Custom Selection"], horizontal=True)
 
-    # Suggestion Mode
-    suggestion_mode = st.radio(
-        "Suggestion Mode:",
-        [
-            "Strict: Only use selected ingredients",
-            "Flexible: Allow pantry items and suggest extras"
-        ],
-        index=1
-    )
-
-    if st.button("🍚 Suggest Meal for Selected Items"):
-        if not selected_items:
-            st.warning("⚠️ Please select at least one item.")
+        if mode == "All Items":
+            chosen_items = inventory
+        elif mode == "Only Pantry (stable=1)":
+            chosen_items = [i for i in inventory if i["stable"]]
         else:
-            selected_str = "\n".join(selected_items)
-            pantry_list = ", ".join(PANTRY_ITEMS)
+            names = [f"{i['name']} ({i['amount']} {i['unit']})" for i in inventory]
+            selected = st.multiselect("Select items to include:", names)
+            chosen_items = [i for i, name in zip(inventory, names) if name in selected]
 
-            if suggestion_mode == "Strict: Only use selected ingredients":
-                prompt = (
-                    "You are a helpful chef assistant.\n"
-                    f"ONLY use the following ingredients:\n{selected_str}\n\n"
-                    f"You may also use pantry items if needed: {pantry_list}.\n"
-                    "Use only these ingredients — no others allowed other than basic pantry items.\n"
-                    "List exact quantities using 'kg', 'liter', or 'pcs' and make sure the amount is suitable for a single person.\n"
-                    "Then list recipe steps clearly.\n"
-                    "Estimate total calories.\n"
-                    "Format the ingredient list in JSON, wrapped with triple backticks like this: ```json [{\"name\": \"rice\", \"amount\": 0.2, \"unit\": \"kg\"}, ...] ```"
-                )
+        if st.button("Generate Recipes with AI 🍳", type="primary"):
+            if not chosen_items:
+                st.warning("No items selected!")
             else:
-                prompt = (
-                    "You are a helpful chef assistant.\n"
-                    f"Use these main ingredients:\n{selected_str}\n\n"
-                    f"You may also use pantry items if needed: {pantry_list}.\n"
-                    "You MAY suggest helpful extras, but label them as '(recommended to buy)'.\n"
-                    "List exact quantities using 'kg', 'liter', or 'pcs'.\n"
-                    "List the instructions clearly, and estimate total calories.\n"
-                    "Format the ingredient list in JSON, wrapped with triple backticks like this: ```json [{\"name\": \"rice\", \"amount\": 0.2, \"unit\": \"kg\"}, ...] ```"
-                )
+                pantry_list = [f"{i['name']} - {i['amount']} {i['unit']}" for i in chosen_items]
+                prompt = f"""
+                You are an AI chef. Using ONLY these pantry items:\n{pantry_list}\n
+                Suggest 3 unique recipes. Each recipe must include:
+                - Title
+                - Step-by-step instructions
+                - Nutritional info per serving
+                - Missing ingredients list (if any)
+                Format clearly.
+                """
+                recipes = _ai_complete(prompt)
+                st.markdown("### 🍽 AI Recipes")
+                st.write(recipes)
 
-            with st.spinner("🤔 Thinking..."):
-                response = openai.ChatCompletion.create(
-                    model="gpt-4",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.6
-                )
-                result = response.choices[0].message["content"]
-                st.session_state["latest_recipe"] = result
-                st.success("✅ Recipe Generated!")
+                # Extract missing items for quick add
+                if "Missing ingredients" in recipes:
+                    st.markdown("#### ➕ Add Missing Ingredients to Inventory")
+                    missing_input = st.text_area("Paste missing ingredients here (one per line):")
+                    if st.button("Add to Inventory"):
+                        for line in missing_input.split("\n"):
+                            if line.strip():
+                                _add_item(user_id, line.strip(), 1, "pcs", 0.0, 0)
+                        st.success("Added missing items to inventory!")
 
-                # Clean display of Ingredient List
-                match = re.search(r"```json\s*(\[.*?\])\s*```", result, re.DOTALL)
-                if match:
-                    try:
-                        ingredients_json = json.loads(match.group(1))
-                        st.session_state["deduct_ingredients"] = ingredients_json
-                    except:
-                        ingredients_json = []
-                else:
-                    ingredients_json = []
+    # ==================================
+    # TAB 2 — Waste & Cost Insights
+    # ==================================
+    with tabs[1]:
+        st.subheader("AI Analysis of Your Inventory")
 
-                # Display the recipe text (excluding the JSON block)
-                clean_text = re.split(r"```json.*?```", result, flags=re.DOTALL)[-1].strip()
-                st.markdown(clean_text)
-
-                # Display clean bullet list of ingredients
-                if ingredients_json:
-                    st.subheader("🧾 Ingredient List:")
-                    for ing in ingredients_json:
-                        label = ing["name"]
-                        if "recommended to buy" in label.lower():
-                            label = label.split(":", 1)[-1].strip()
-                            st.markdown(f"- 🛒 *{ing['amount']} {ing['unit']} {label}*")
-                        else:
-                            st.markdown(f"- {ing['amount']} {ing['unit']} {label}")
-
-    # --- Proceed Button ---
-    if "latest_recipe" in st.session_state and suggestion_mode == "Strict: Only use selected ingredients":
-        st.subheader("✅ Proceed with this Recipe?")
-        if st.button("✅ Confirm and Deduct Ingredients"):
-            try:
-                ingredients_json = st.session_state.get("deduct_ingredients")
-                if not ingredients_json:
-                    raise ValueError("No parsed ingredients in session.")
-            except Exception as e:
-                st.warning("⚠️ Could not parse ingredients. Skipping deduction.")
-                st.text(f"Error: {e}")
-                return
-
-            deducted = []
-            missing = []
-            inventory_map = {
-                name.lower(): (item_id, amount, unit)
-                for item_id, name, _, _, amount, unit in items
-            }
-
-            for ing in ingredients_json:
-                ing_name = ing["name"].lower()
-                ing_amount = ing["amount"]
-                ing_unit = ing["unit"]
-                if ing_name in inventory_map:
-                    item_id, current_amount, current_unit = inventory_map[ing_name]
-                    if ing_unit == current_unit:
-                        if current_amount >= ing_amount:
-                            update_item_amount(item_id, round(current_amount - ing_amount, 2))
-                            deducted.append(ing_name)
-                        else:
-                            missing.append(f"{ing_name} (have {current_amount}, need {ing_amount})")
-                    else:
-                        missing.append(f"{ing_name} (unit mismatch: {current_unit} vs {ing_unit})")
-                else:
-                    if ing_name not in [p.lower() for p in PANTRY_ITEMS]:
-                        missing.append(f"{ing_name} (not found)")
-
-            if deducted:
-                st.success(f"✅ Deducted: {', '.join(deducted)}")
-            if missing:
-                st.warning("⚠️ Missing or insufficient: " + ", ".join(missing))
-
-            st.rerun()
+        if st.button("Analyze My Pantry & Usage 💡"):
+            inv_text = "\n".join(
+                [f"{i['name']} - {i['amount']} {i['unit']} - expires {i['expiration']} - price/unit {i['price']}"
+                 for i in inventory]
+            )
+            prompt = f"""
+            You are an AI inventory and cost optimization expert.
+            Analyze this inventory list:\n{inv_text}\n
+            Provide:
+            1. Items at high risk of expiry soon and ideas to use them up.
+            2. Suggestions to save money (buy in bulk, substitute, skip).
+            3. Ideas for reducing waste in the next month.
+            """
+            insights = _ai_complete(prompt)
+            st.markdown("### 📊 AI Insights")
+            st.write(insights)
