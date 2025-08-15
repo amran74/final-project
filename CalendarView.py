@@ -1,166 +1,130 @@
-# CalendarView.py — Premium, balanced homepage
+# CalendarView.py — Premium Home Dashboard
 import streamlit as st
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from streamlit_calendar import calendar
 import db
 import openai
 
-# ==============================
-# Styles
-# ==============================
-st.markdown("""
-<style>
-.section {
-    margin-bottom: 2rem;
-}
-.kpi-card {
-    background:#0f1428;
-    border:1px solid #1e2a44;
-    border-radius:12px;
-    padding:14px;
-    text-align:center;
-    box-shadow:0 0 8px rgba(0,0,0,0.15);
-}
-.kpi-card .val {
-    font-weight:700;
-    font-size:22px;
-    color:#e8f2ff;
-}
-.kpi-card .lbl {
-    font-size:13px;
-    color:#9bb3c7;
-}
-.upcoming-table {
-    background:#121629;
-    border-radius:10px;
-    border:1px solid #1e2a44;
-    padding:10px;
-}
-.upcoming-item {
-    padding:6px 0;
-    border-bottom:1px solid rgba(255,255,255,0.05);
-    font-size:14px;
-    color:#dfe9f3;
-}
-.upcoming-item:last-child {
-    border-bottom:none;
-}
-.smart-suggestions {
-    background:#0f1428;
-    border:1px solid #1e2a44;
-    border-radius:10px;
-    padding:14px;
-}
-.smart-suggestions h4 {
-    color:#9bd7ff;
-}
-</style>
-""", unsafe_allow_html=True)
+# ========= CONFIG =========
+CALENDAR_HEIGHT = 450  # Smaller for balance
+MAX_UPCOMING_ITEMS = 5
 
-
-# ==============================
-# AI Helper
-# ==============================
-def get_ai_tip(user_id: int) -> str:
-    """Generate AI suggestion based on expiring items."""
-    conn = db.get_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT name, amount, unit, expiration
-        FROM inventory
-        WHERE user_id=? AND expiration >= ? 
-        ORDER BY expiration ASC
-        LIMIT 5
-    """, (user_id, date.today().isoformat()))
-    items = c.fetchall()
-    conn.close()
-
-    if not items:
-        return "No items are expiring soon. Keep up the great work! ✅"
-
-    items_str = "\n".join([f"- {n} ({a} {u}) expiring on {e}" for n, a, u, e in items])
-
+# ========= AI HELPER =========
+def get_ai_dashboard_tips(user_name: str, items_due: list) -> dict:
+    """
+    Generate AI-powered tips using OpenAI.
+    """
+    item_list = ", ".join([f"{n} ({d})" for n, d in items_due]) if items_due else "no urgent items"
     prompt = f"""
-    You are a smart kitchen assistant. Based on the following items expiring soon:
-    {items_str}
-
-    Give me 1 short tip of the day to help reduce waste, and 2 quick meal/snack ideas
-    using one or more of these items. Be concise and friendly.
+    You are a smart kitchen assistant for {user_name}.
+    Based on these urgent items: {item_list}, give:
+    1 short waste reduction tip,
+    1 short storage optimization tip,
+    and 1 short meal idea using at least one urgent item.
+    Keep each under 20 words.
     """
     try:
-        resp = openai.ChatCompletion.create(
+        res = openai.ChatCompletion.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": "You are a concise kitchen coach."},
-                      {"role": "user", "content": prompt}],
-            max_tokens=120,
-            temperature=0.7
+            messages=[{"role": "system", "content": prompt}],
+            max_tokens=120
         )
-        return resp.choices[0].message["content"].strip()
-    except Exception:
-        return "Tip of the day: Store perishables in the fridge and label them with the date."
+        text = res.choices[0].message["content"].strip()
+        parts = text.split("\n")
+        return {
+            "waste_tip": parts[0] if len(parts) > 0 else "",
+            "storage_tip": parts[1] if len(parts) > 1 else "",
+            "meal_idea": parts[2] if len(parts) > 2 else ""
+        }
+    except Exception as e:
+        return {
+            "waste_tip": "Keep track of expiry dates weekly.",
+            "storage_tip": "Store produce in breathable bags.",
+            "meal_idea": "Make a stir fry with veggies."
+        }
 
-
-# ==============================
-# Homepage View
-# ==============================
+# ========= MAIN VIEW =========
 def calendar_view():
-    st.title(f"👋 Welcome, {st.session_state.get('name', 'User')}")
-
-    uid = st.session_state.get("user_id")
-    if not uid:
-        st.warning("Please log in to see your dashboard.")
+    if "user_id" not in st.session_state:
+        st.warning("Please log in first.")
         return
 
-    # Section 1: AI Overview
-    with st.container():
-        st.subheader("💡 Today's Smart Insight")
-        st.write(get_ai_tip(uid))
+    user_id = st.session_state["user_id"]
+    user_name = st.session_state.get("name", "User")
 
-    # Section 2: KPI Cards
-    items, used, expired, lost = db.get_monthly_summary(uid)["month"], None, None, None
-    total_items, used_steps, expired_steps, money_lost = (
-        db._kpis(uid) if hasattr(db, "_kpis") else (
-            db.get_connection().execute("SELECT COUNT(*) FROM inventory WHERE user_id=?", (uid,)).fetchone()[0],
-            db.get_monthly_summary(uid)["used_steps"],
-            db.get_monthly_summary(uid)["expired_steps"],
-            db.get_monthly_summary(uid)["money_lost"],
-        )
-    )
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.markdown(f"<div class='kpi-card'><div class='val'>{total_items}</div><div class='lbl'>Items in stock</div></div>", unsafe_allow_html=True)
-    with k2:
-        st.markdown(f"<div class='kpi-card'><div class='val'>{used_steps}</div><div class='lbl'>Used steps (month)</div></div>", unsafe_allow_html=True)
-    with k3:
-        st.markdown(f"<div class='kpi-card'><div class='val'>{expired_steps}</div><div class='lbl'>Expired steps (month)</div></div>", unsafe_allow_html=True)
-    with k4:
-        st.markdown(f"<div class='kpi-card'><div class='val'>₪{money_lost:.2f}</div><div class='lbl'>Money lost (month)</div></div>", unsafe_allow_html=True)
-
-    # Section 3: Upcoming Expirations
-    st.markdown("### ⏳ Upcoming Expirations")
+    # ---- Get inventory ----
     conn = db.get_connection()
     c = conn.cursor()
+    today = date.today()
     c.execute("""
-        SELECT name, amount, unit, expiration
+        SELECT name, expiration, id
         FROM inventory
-        WHERE user_id=? AND expiration >= ?
-        ORDER BY expiration ASC
-        LIMIT 5
-    """, (uid, date.today().isoformat()))
-    upcoming = c.fetchall()
+        WHERE user_id = ?
+        ORDER BY date(expiration) ASC
+    """, (user_id,))
+    all_items = c.fetchall()
     conn.close()
 
-    if upcoming:
-        with st.container():
-            st.markdown("<div class='upcoming-table'>", unsafe_allow_html=True)
-            for n, a, u, e in upcoming:
-                st.markdown(f"<div class='upcoming-item'>📌 {n} — {a} {u} (exp {e})</div>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-    else:
-        st.info("No upcoming expirations.")
+    upcoming_items = [
+        (name, exp, iid)
+        for name, exp, iid in all_items
+        if exp and date.fromisoformat(exp) <= today + timedelta(days=7)
+    ][:MAX_UPCOMING_ITEMS]
 
-    # Section 4: Calendar
-    st.markdown("### 📅 Calendar")
-    events = [{"title": f"{n} expires", "start": e} for n, _, _, e in upcoming]
-    calendar(events, options={"initialView": "dayGridMonth"})
+    # ---- AI tips ----
+    ai_tips = get_ai_dashboard_tips(user_name, [(n, d) for n, d, _ in upcoming_items])
+
+    # ---- Stats ----
+    stats = db.get_monthly_summary(user_id)
+
+    # ========= LAYOUT =========
+    st.markdown(f"## 👋 Welcome back, {user_name}")
+    st.markdown("### 🧠 Your Smart Coach Today")
+
+    col1, col2, col3 = st.columns(3)
+    col1.info(f"💡 Waste Tip:\n{ai_tips['waste_tip']}")
+    col2.success(f"📦 Storage Tip:\n{ai_tips['storage_tip']}")
+    col3.warning(f"🍽 Meal Idea:\n{ai_tips['meal_idea']}")
+
+    # ---- Stats cards ----
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("📦 Total Items", len(all_items))
+    k2.metric("✅ Used (mo)", stats["used_steps"])
+    k3.metric("⛔ Expired (mo)", stats["expired_steps"])
+    k4.metric("💰 Money Lost (mo)", f"₪{stats['money_lost']:.2f}")
+
+    # ---- Upcoming expirations ----
+    st.markdown("### ⏳ Items Expiring Soon")
+    if upcoming_items:
+        for name, exp, iid in upcoming_items:
+            cols = st.columns([3, 2, 1, 1])
+            cols[0].write(f"**{name}**")
+            cols[1].write(f"📅 {exp}")
+            if cols[2].button("✅ Use", key=f"use_{iid}"):
+                db.use_one_step(iid)
+                st.rerun()
+            if cols[3].button("❌ Expire", key=f"exp_{iid}"):
+                db.expire_all(iid)
+                st.rerun()
+    else:
+        st.info("No items expiring soon 🎉")
+
+    # ---- Compact Calendar ----
+    st.markdown("### 📅 Your Week at a Glance")
+    events = []
+    for name, exp, iid in all_items:
+        events.append({
+            "title": name,
+            "start": exp,
+            "end": exp,
+            "color": "#ff6b6b" if date.fromisoformat(exp) < today else "#1dd1a1"
+        })
+
+    calendar(
+        events=events,
+        options={
+            "initialView": "listWeek",
+            "height": CALENDAR_HEIGHT
+        }
+    )
 
