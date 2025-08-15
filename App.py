@@ -85,6 +85,7 @@ div[data-testid="column"] .navbtn > button {
 </style>
 """, unsafe_allow_html=True)
 
+
 # ================== One-time DB sanity ==================
 create_tables()
 reset_monthly_counters()
@@ -92,7 +93,7 @@ reset_monthly_counters()
 # ================== Page registry ==================
 PAGES = {
     "🏡 Home": calendar_view,
-    "📦 Inv": inventory,
+    "📦 Stock": inventory,
     "🧠 Coach": coach,
     "🤖 AI": ai_assistant,
     "📊 Stats": dashboard,
