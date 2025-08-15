@@ -1,29 +1,40 @@
+# db.py
 import sqlite3
 from datetime import datetime, date
+from typing import Optional, Tuple
 
 DB_PATH = "inventory.db"
 
-# --- DB Connection ---
-def get_connection():
+# ==============================
+# Connection
+# ==============================
+
+def get_connection() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH)
 
-# --- Create Tables (Users + Inventory + Usage Log) ---
-def create_tables():
+# ==============================
+# Schema / Migrations
+# ==============================
+
+def create_tables() -> None:
+    """
+    Create base tables and apply additive migrations without destroying existing data.
+    """
     conn = get_connection()
     c = conn.cursor()
 
-    # --- Users Table ---
-    c.execute('''
+    # Users
+    c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             phone TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
             name TEXT NOT NULL
         )
-    ''')
+    """)
 
-    # --- Inventory Table with full tracking ---
-    c.execute('''
+    # Inventory (base, matching user's original fields)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS inventory (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -39,48 +50,45 @@ def create_tables():
             price_per_unit REAL DEFAULT 0.0,
             FOREIGN KEY(user_id) REFERENCES users(id)
         )
-    ''')
+    """)
 
-    # --- Gentle migrations for inventory ---
-    for col, ddl in [
-        ("money_lost", "ALTER TABLE inventory ADD COLUMN money_lost REAL DEFAULT 0.0"),
-    ]:
-        try:
-            c.execute(f"SELECT {col} FROM inventory LIMIT 1")
-        except sqlite3.OperationalError:
-            c.execute(ddl)
+    # Additive inventory migrations
+    _ensure_column(c, "inventory", "money_lost", "ALTER TABLE inventory ADD COLUMN money_lost REAL DEFAULT 0.0")
 
-    # --- Usage Log Table (we'll enrich it with new columns if missing) ---
-    c.execute('''
+    # Usage log (legacy compatible)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS usage_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             item_id INTEGER,
-            used_date TEXT,
-            used_count INTEGER
+            used_date TEXT,          -- legacy
+            used_count INTEGER       -- legacy
         )
-    ''')
+    """)
 
-    # Upgrade usage_log to carry richer info without nuking old data
-    for col, ddl in [
-        ("event_type",   "ALTER TABLE usage_log ADD COLUMN event_type TEXT"),
-        ("quantity",     "ALTER TABLE usage_log ADD COLUMN quantity REAL"),
-        ("unit",         "ALTER TABLE usage_log ADD COLUMN unit TEXT"),
-        ("step_count",   "ALTER TABLE usage_log ADD COLUMN step_count INTEGER"),
-        ("value_shekel", "ALTER TABLE usage_log ADD COLUMN value_shekel REAL"),
-        ("ts",           "ALTER TABLE usage_log ADD COLUMN ts TEXT"),
-        ("month_key",    "ALTER TABLE usage_log ADD COLUMN month_key TEXT"),
-    ]:
-        try:
-            c.execute(f"SELECT {col} FROM usage_log LIMIT 1")
-        except sqlite3.OperationalError:
-            c.execute(ddl)
+    # Enrich usage_log with modern fields (non-destructive)
+    _ensure_column(c, "usage_log", "event_type",   "ALTER TABLE usage_log ADD COLUMN event_type TEXT")
+    _ensure_column(c, "usage_log", "quantity",     "ALTER TABLE usage_log ADD COLUMN quantity REAL")
+    _ensure_column(c, "usage_log", "unit",         "ALTER TABLE usage_log ADD COLUMN unit TEXT")
+    _ensure_column(c, "usage_log", "step_count",   "ALTER TABLE usage_log ADD COLUMN step_count INTEGER")
+    _ensure_column(c, "usage_log", "value_shekel", "ALTER TABLE usage_log ADD COLUMN value_shekel REAL")
+    _ensure_column(c, "usage_log", "ts",           "ALTER TABLE usage_log ADD COLUMN ts TEXT")
+    _ensure_column(c, "usage_log", "month_key",    "ALTER TABLE usage_log ADD COLUMN month_key TEXT")
 
     conn.commit()
     conn.close()
 
-# ---------- Auth helpers unchanged ----------
-def create_user(phone, password, name):
+def _ensure_column(c: sqlite3.Cursor, table: str, col: str, ddl: str) -> None:
+    try:
+        c.execute(f"SELECT {col} FROM {table} LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute(ddl)
+
+# ==============================
+# Auth helpers
+# ==============================
+
+def create_user(phone: str, password: str, name: str) -> bool:
     conn = get_connection()
     c = conn.cursor()
     c.execute("SELECT id FROM users WHERE phone = ?", (phone,))
@@ -97,7 +105,7 @@ def create_user(phone, password, name):
     finally:
         conn.close()
 
-def authenticate_user(phone, password):
+def authenticate_user(phone: str, password: str):
     conn = get_connection()
     c = conn.cursor()
     c.execute("SELECT id, phone, name FROM users WHERE phone = ? AND password = ?", (phone, password))
@@ -105,8 +113,11 @@ def authenticate_user(phone, password):
     conn.close()
     return user
 
-# --- Update Inventory Item ---
-def update_item(item_id, name, expiration, food_type, amount, unit, price_per_unit=None):
+# ==============================
+# Inventory updates and monthly reset
+# ==============================
+
+def update_item(item_id: int, name: str, expiration: str, food_type: str, amount: float, unit: str, price_per_unit: Optional[float] = None) -> None:
     conn = get_connection()
     c = conn.cursor()
     if price_per_unit is None:
@@ -124,8 +135,7 @@ def update_item(item_id, name, expiration, food_type, amount, unit, price_per_un
     conn.commit()
     conn.close()
 
-# --- Monthly Reset of used/expired counters ---
-def reset_monthly_counters():
+def reset_monthly_counters() -> None:
     conn = get_connection()
     c = conn.cursor()
     current_month = date.today().strftime("%Y-%m")
@@ -143,43 +153,65 @@ def reset_monthly_counters():
     conn.commit()
     conn.close()
 
-# ---------- Unit math helpers ----------
+# ==============================
+# Unit math
+# ==============================
+
 STEP_GRAMS = 100.0
 STEP_ML = 100.0
 
-def _normalize_quantity(qty: float, unit: str):
-    """Return (normalized_amount, normalized_unit, step_size). +1 per pc or per 100 g/ml."""
-    unit = (unit or "pcs").lower().strip()
-    if unit in ("pcs", "pc", "piece"):
+def _normalize_quantity(qty: float, unit: str) -> Tuple[float, str, float]:
+    """
+    Return (normalized_amount, normalized_unit, step_size).
+    Rule: +1 per piece OR per 100 g OR per 100 ml.
+    """
+    u = (unit or "pcs").lower().strip()
+    if u in ("pcs", "pc", "piece"):
         return qty, "pcs", 1.0
-    if unit in ("g",):
+    if u == "g":
         return qty, "g", STEP_GRAMS
-    if unit in ("kg",):
+    if u == "kg":
         return qty * 1000.0, "g", STEP_GRAMS
-    if unit in ("ml",):
+    if u == "ml":
         return qty, "ml", STEP_ML
-    if unit in ("l", "lt", "liter", "litre"):
+    if u in ("l", "lt", "liter", "litre"):
         return qty * 1000.0, "ml", STEP_ML
-    # Unknown circus units default to pieces. Your future self can fight you later.
+    # Unknown unit -> treat like pieces
     return qty, "pcs", 1.0
 
 def _compute_step_count(qty: float, unit: str) -> int:
     amount_norm, _, step_size = _normalize_quantity(qty, unit)
     if step_size <= 0:
         return 0
-    # integer ceiling without importing math
-    steps = int((amount_norm + step_size - 1) // step_size)
-    return max(steps, 0)
+    # integer ceiling
+    return max(int((amount_norm + step_size - 1) // step_size), 0)
 
-def _today_keys():
+def _one_step_qty_in_unit(unit: str) -> float:
+    u = (unit or "pcs").lower().strip()
+    if u in ("pcs", "pc", "piece"):
+        return 1.0
+    if u == "g":
+        return 100.0
+    if u == "kg":
+        return 0.1         # 0.1 kg = 100 g
+    if u == "ml":
+        return 100.0
+    if u in ("l", "lt", "liter", "litre"):
+        return 0.1         # 0.1 L = 100 ml
+    return 1.0
+
+def _today_keys() -> Tuple[str, str]:
     ts = datetime.now()
     return ts.isoformat(timespec="seconds"), ts.strftime("%Y-%m")
 
-# ---------- Core operations ----------
-def use_item(item_id: int, qty: float):
+# ==============================
+# Core operations
+# ==============================
+
+def use_item(item_id: int, qty: float) -> dict:
     """
-    Decrease stock by qty, increment used_count by step rule, log the event.
-    No money lost for usage because you actually used it like a responsible mammal.
+    Decrease stock by qty, increment used_count by +1 per piece/100g/100ml used,
+    log the event. No money lost for usage.
     """
     if qty <= 0:
         raise ValueError("Quantity must be positive.")
@@ -210,6 +242,7 @@ def use_item(item_id: int, qty: float):
     """, (new_amount, new_used, item_id))
 
     ts, month_key = _today_keys()
+    # Fill modern columns; legacy ones left NULL
     c.execute("""
         INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
         VALUES (?, ?, 'used', ?, ?, ?, 0.0, ?, ?)
@@ -219,10 +252,10 @@ def use_item(item_id: int, qty: float):
     conn.close()
     return {"used_step_added": step_inc, "remaining": new_amount, "unit": unit}
 
-def expire_item(item_id: int, qty: float | None = None):
+def expire_item(item_id: int, qty: Optional[float] = None) -> dict:
     """
     Mark qty as expired (default: entire remaining amount), increment expired_count by step rule,
-    add NIS to money_lost (qty × price_per_unit), log it.
+    add ₪ to money_lost (qty × price_per_unit), log it, and reduce stock accordingly.
     """
     conn = get_connection()
     c = conn.cursor()
@@ -268,8 +301,89 @@ def expire_item(item_id: int, qty: float | None = None):
     conn.close()
     return {"expired_step_added": step_inc, "lost_nis_total": new_lost, "remaining": new_amount, "unit": unit}
 
-# Convenience: monthly totals for dashboards without pain
-def get_monthly_summary(user_id: int, month_key: str | None = None):
+def use_one_step(item_id: int) -> dict:
+    """
+    Decrease stock by exactly one 'step' (1 pc or 100 g/ml),
+    increment used_count by +1, and log it.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT user_id, amount, unit, used_count FROM inventory WHERE id = ?", (item_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        raise ValueError("Item not found.")
+
+    user_id, amount, unit, used_count = row
+    amount = amount or 0.0
+    step_qty = _one_step_qty_in_unit(unit)
+
+    if amount < step_qty:
+        conn.close()
+        raise ValueError(f"Not enough stock to use one step: have {amount} {unit}, need {step_qty} {unit}.")
+
+    new_amount = amount - step_qty
+    new_used = (used_count or 0) + 1
+
+    c.execute("UPDATE inventory SET amount = ?, used_count = ? WHERE id = ?", (new_amount, new_used, item_id))
+
+    ts, month_key = _today_keys()
+    c.execute("""
+        INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
+        VALUES (?, ?, 'used', ?, ?, 1, 0.0, ?, ?)
+    """, (user_id, item_id, step_qty, unit, ts, month_key))
+
+    conn.commit()
+    conn.close()
+    return {"used_step_added": 1, "deducted": step_qty, "remaining": new_amount, "unit": unit}
+
+def expire_all(item_id: int) -> dict:
+    """
+    Expire the entire remaining amount. Increments expired_count by steps,
+    adds ₪ to money_lost, zeroes the stock, and logs it.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""SELECT user_id, amount, unit, price_per_unit, expired_count, money_lost
+                 FROM inventory WHERE id = ?""", (item_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        raise ValueError("Item not found.")
+
+    user_id, amount, unit, ppu, expired_count, money_lost = row
+    amount = amount or 0.0
+    if amount <= 0:
+        conn.close()
+        return {"expired_step_added": 0, "lost_nis_total": float(money_lost or 0.0), "remaining": 0.0, "unit": unit}
+
+    step_inc = _compute_step_count(amount, unit)
+    lost_value = round((ppu or 0.0) * amount, 2)
+
+    new_expired = (expired_count or 0) + step_inc
+    new_lost = round((money_lost or 0.0) + lost_value, 2)
+
+    c.execute("""
+        UPDATE inventory
+        SET amount = 0, expired_count = ?, money_lost = ?
+        WHERE id = ?
+    """, (new_expired, new_lost, item_id))
+
+    ts, month_key = _today_keys()
+    c.execute("""
+        INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
+        VALUES (?, ?, 'expired', ?, ?, ?, ?, ?, ?)
+    """, (user_id, item_id, amount, unit, step_inc, lost_value, ts, month_key))
+
+    conn.commit()
+    conn.close()
+    return {"expired_step_added": step_inc, "lost_nis_total": new_lost, "remaining": 0.0, "unit": unit}
+
+# ==============================
+# Reporting
+# ==============================
+
+def get_monthly_summary(user_id: int, month_key: Optional[str] = None) -> dict:
     conn = get_connection()
     c = conn.cursor()
     if not month_key:
@@ -291,5 +405,5 @@ def get_monthly_summary(user_id: int, month_key: str | None = None):
         "money_lost": round(row[2] or 0.0, 2)
     }
 
-# Ensure tables exist and migrations run at import
+# Ensure tables exist and migrations run at import time
 create_tables()
