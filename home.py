@@ -48,7 +48,8 @@ def home():
                 st.session_state["phone"] = user[1]
                 st.session_state["name"] = user[2]
                 st.success(f"✅ Welcome back, {user[2]}!")
-                st.experimental_rerun()
+                st.rerun()
+
             else:
                 st.error("❌ Invalid phone number or password.")
 
