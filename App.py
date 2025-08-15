@@ -1,6 +1,5 @@
-# App.py — Sleek shell with fixed-width, no-wrap nav + KPIs + deep links
+# App.py — Sleek shell with fixed-width, no-wrap nav + KPIs + deep links + post-login redirect
 from datetime import date
-import os
 import streamlit as st
 
 # --- Pages ---
@@ -117,11 +116,21 @@ if not st.session_state.get("authenticated"):
         pass
     if want in ALIAS:
         st.session_state["post_login_target"] = ALIAS[want]
+
+    # render login/register/recover
     home()
+
+    # If login just succeeded inside home(), jump to 🏡 Home immediately
+    if st.session_state.get("just_logged_in"):
+        st.session_state["__page"] = "🏡 Home"
+        st.session_state.pop("just_logged_in", None)
+        st.rerun()
+
     st.stop()
 
 # ================== Initial page selection (deep link aware) ==================
 if "__page" not in st.session_state:
+    # 1) honor post-login deep link, else 2) honor URL ?page=..., else 3) default Home
     target = st.session_state.pop("post_login_target", None)
     if not target:
         qp = st.query_params
@@ -183,7 +192,7 @@ PAGES.get(current, calendar_view)()
 st.markdown(f"""
 <hr style="opacity:0.15">
 <div style="font-size:12px;color:#93a4b4;display:flex;justify-content:space-between;">
-  <div>v1.5 • {date.today().isoformat()} • {current}</div>
+  <div>v1.6 • {date.today().isoformat()} • {current}</div>
   <div>Made with Python and questionable life choices.</div>
 </div>
 """, unsafe_allow_html=True)
