@@ -106,7 +106,7 @@ def _goto(label: str):
     st.toast(label.replace("📦","").replace("🏡","").replace("🧠","").replace("🤖","").replace("📊","").strip(), icon="➡️")
 
 # ================== Global post-login interceptor ==================
-# If home.py set "just_logged_in", force page to Home and rerun no matter where we are.
+# If home.py just set the flag, force switch to Home and rerun, no matter what.
 if st.session_state.get("just_logged_in"):
     st.session_state["__page"] = "🏡 Home"
     st.session_state.pop("just_logged_in", None)
@@ -114,7 +114,7 @@ if st.session_state.get("just_logged_in"):
 
 # ================== Auth gate ==================
 if not st.session_state.get("authenticated"):
-    # store deep link target for after login
+    # remember deep link for after login
     qp = st.query_params
     want = ""
     try:
@@ -126,8 +126,23 @@ if not st.session_state.get("authenticated"):
 
     # render login/register/recover
     home()
-    # if login happens inside home(), the global interceptor above will catch it on rerun
+    # when login succeeds, home.py sets `authenticated=True` and `just_logged_in=True`;
+    # the global interceptor above will catch it on the next run.
     st.stop()
+
+# ================== Jump handler (from CalendarView quick buttons) ==================
+if st.session_state.get("jump"):
+    nav = st.session_state.pop("nav", None)
+    st.session_state.pop("jump", None)
+    if nav == "inventory":
+        st.session_state["__page"] = "📦 Inventory"
+    elif nav == "ai":
+        st.session_state["__page"] = "🤖 AI Assistant"
+    elif nav == "dashboard":
+        st.session_state["__page"] = "📊 Dashboard"
+    elif nav == "home":
+        st.session_state["__page"] = "🏡 Home"
+    st.rerun()
 
 # ================== Initial page selection (deep link aware) ==================
 if "__page" not in st.session_state:
@@ -193,7 +208,7 @@ PAGES.get(current, calendar_view)()
 st.markdown(f"""
 <hr style="opacity:0.15">
 <div style="font-size:12px;color:#93a4b4;display:flex;justify-content:space-between;">
-  <div>v1.7 • {date.today().isoformat()} • {current}</div>
+  <div>v1.8 • {date.today().isoformat()} • {current}</div>
   <div>Made with Python and questionable life choices.</div>
 </div>
 """, unsafe_allow_html=True)
