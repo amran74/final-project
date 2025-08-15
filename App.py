@@ -24,36 +24,40 @@ st.set_page_config(
 # ================== Styles ==================
 st.markdown("""
 <style>
-/* Force all nav buttons to same width */
 .navbtn > button {
-    min-width: 120px !important;
-    max-width: 120px !important;
-    text-align: center !important;
-    white-space: nowrap !important;
-    overflow: hidden !important;
-    text-overflow: ellipsis !important;
+    min-width: 130px !important;
+    max-width: 130px !important;
+    height: 42px !important;
     display: inline-flex !important;
     align-items: center !important;
     justify-content: center !important;
-    padding: 6px 8px !important;
+    gap: 6px !important;
     font-size: 14px !important;
+    font-weight: 500 !important;
+    padding: 0 10px !important;
+    background: #121629 !important;
+    border-radius: 10px !important;
+    border: 1px solid #1e2a44 !important;
+    color: #dfe9f3 !important;
+    white-space: nowrap !important; /* THIS stops wrapping */
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
 }
 
-/* Active button highlight */
+/* Active state */
 .navbtn.active > button {
     background: #0d2744 !important;
     border-color: #00bfff !important;
     color: #e8f6ff !important;
 }
 
-/* Make icons not push text weirdly */
-.navbtn > button > div {
-    display: flex;
-    align-items: center;
-    gap: 5px;
+/* Remove weird Streamlit hover shadow */
+.navbtn > button:hover {
+    border-color: #00bfff !important;
 }
 </style>
 """, unsafe_allow_html=True)
+
 
 
 # ================== One-time DB sanity ==================
