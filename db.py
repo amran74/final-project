@@ -33,6 +33,10 @@ def create_tables() -> None:
         )
     """)
 
+    # Add secret question & answer columns if missing
+    _ensure_column(c, "users", "secret_question", "ALTER TABLE users ADD COLUMN secret_question TEXT")
+    _ensure_column(c, "users", "secret_answer", "ALTER TABLE users ADD COLUMN secret_answer TEXT")
+
     # Inventory (base, matching user's original fields)
     c.execute("""
         CREATE TABLE IF NOT EXISTS inventory (
@@ -88,7 +92,8 @@ def _ensure_column(c: sqlite3.Cursor, table: str, col: str, ddl: str) -> None:
 # Auth helpers
 # ==============================
 
-def create_user(phone: str, password: str, name: str) -> bool:
+def create_user(phone: str, password: str, name: str,
+                secret_question: str = None, secret_answer: str = None) -> bool:
     conn = get_connection()
     c = conn.cursor()
     c.execute("SELECT id FROM users WHERE phone = ?", (phone,))
@@ -96,7 +101,10 @@ def create_user(phone: str, password: str, name: str) -> bool:
         conn.close()
         return False
     try:
-        c.execute("INSERT INTO users (phone, password, name) VALUES (?, ?, ?)", (phone, password, name))
+        c.execute("""
+            INSERT INTO users (phone, password, name, secret_question, secret_answer)
+            VALUES (?, ?, ?, ?, ?)
+        """, (phone, password, name, secret_question, (secret_answer or "").lower()))
         conn.commit()
         return True
     except Exception as e:
@@ -112,6 +120,26 @@ def authenticate_user(phone: str, password: str):
     user = c.fetchone()
     conn.close()
     return user
+
+def get_user_by_phone(phone: str):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, phone, name, secret_question, secret_answer
+        FROM users WHERE phone = ?
+    """, (phone,))
+    user = c.fetchone()
+    conn.close()
+    return user
+
+def update_password_by_phone(phone: str, new_password: str) -> bool:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("UPDATE users SET password = ? WHERE phone = ?", (new_password, phone))
+    conn.commit()
+    success = c.rowcount > 0
+    conn.close()
+    return success
 
 # ==============================
 # Inventory updates and monthly reset
@@ -161,10 +189,6 @@ STEP_GRAMS = 100.0
 STEP_ML = 100.0
 
 def _normalize_quantity(qty: float, unit: str) -> Tuple[float, str, float]:
-    """
-    Return (normalized_amount, normalized_unit, step_size).
-    Rule: +1 per piece OR per 100 g OR per 100 ml.
-    """
     u = (unit or "pcs").lower().strip()
     if u in ("pcs", "pc", "piece"):
         return qty, "pcs", 1.0
@@ -176,14 +200,12 @@ def _normalize_quantity(qty: float, unit: str) -> Tuple[float, str, float]:
         return qty, "ml", STEP_ML
     if u in ("l", "lt", "liter", "litre"):
         return qty * 1000.0, "ml", STEP_ML
-    # Unknown unit -> treat like pieces
     return qty, "pcs", 1.0
 
 def _compute_step_count(qty: float, unit: str) -> int:
     amount_norm, _, step_size = _normalize_quantity(qty, unit)
     if step_size <= 0:
         return 0
-    # integer ceiling
     return max(int((amount_norm + step_size - 1) // step_size), 0)
 
 def _one_step_qty_in_unit(unit: str) -> float:
@@ -193,11 +215,11 @@ def _one_step_qty_in_unit(unit: str) -> float:
     if u == "g":
         return 100.0
     if u == "kg":
-        return 0.1         # 0.1 kg = 100 g
+        return 0.1
     if u == "ml":
         return 100.0
     if u in ("l", "lt", "liter", "litre"):
-        return 0.1         # 0.1 L = 100 ml
+        return 0.1
     return 1.0
 
 def _today_keys() -> Tuple[str, str]:
@@ -209,10 +231,6 @@ def _today_keys() -> Tuple[str, str]:
 # ==============================
 
 def use_item(item_id: int, qty: float) -> dict:
-    """
-    Decrease stock by qty, increment used_count by +1 per piece/100g/100ml used,
-    log the event. No money lost for usage.
-    """
     if qty <= 0:
         raise ValueError("Quantity must be positive.")
 
@@ -242,7 +260,6 @@ def use_item(item_id: int, qty: float) -> dict:
     """, (new_amount, new_used, item_id))
 
     ts, month_key = _today_keys()
-    # Fill modern columns; legacy ones left NULL
     c.execute("""
         INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
         VALUES (?, ?, 'used', ?, ?, ?, 0.0, ?, ?)
@@ -253,10 +270,6 @@ def use_item(item_id: int, qty: float) -> dict:
     return {"used_step_added": step_inc, "remaining": new_amount, "unit": unit}
 
 def expire_item(item_id: int, qty: Optional[float] = None) -> dict:
-    """
-    Mark qty as expired (default: entire remaining amount), increment expired_count by step rule,
-    add ₪ to money_lost (qty × price_per_unit), log it, and reduce stock accordingly.
-    """
     conn = get_connection()
     c = conn.cursor()
 
@@ -302,10 +315,6 @@ def expire_item(item_id: int, qty: Optional[float] = None) -> dict:
     return {"expired_step_added": step_inc, "lost_nis_total": new_lost, "remaining": new_amount, "unit": unit}
 
 def use_one_step(item_id: int) -> dict:
-    """
-    Decrease stock by exactly one 'step' (1 pc or 100 g/ml),
-    increment used_count by +1, and log it.
-    """
     conn = get_connection()
     c = conn.cursor()
     c.execute("SELECT user_id, amount, unit, used_count FROM inventory WHERE id = ?", (item_id,))
@@ -338,10 +347,6 @@ def use_one_step(item_id: int) -> dict:
     return {"used_step_added": 1, "deducted": step_qty, "remaining": new_amount, "unit": unit}
 
 def expire_all(item_id: int) -> dict:
-    """
-    Expire the entire remaining amount. Increments expired_count by steps,
-    adds ₪ to money_lost, zeroes the stock, and logs it.
-    """
     conn = get_connection()
     c = conn.cursor()
     c.execute("""SELECT user_id, amount, unit, price_per_unit, expired_count, money_lost

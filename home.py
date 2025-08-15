@@ -1,52 +1,116 @@
+import re
 import streamlit as st
-from db import create_user, authenticate_user
+from db import (
+    create_user, authenticate_user,
+    get_user_by_phone, update_password_by_phone
+)
 
-# ❌ DO NOT call st.set_page_config here — it's already done in App.py
+# ---------- Helpers ----------
+def _normalize_phone(p: str) -> str:
+    return re.sub(r"[^\d+]", "", (p or "").strip())
 
+def _password_strength(pw: str) -> tuple[int, str]:
+    score = 0
+    if len(pw) >= 8: score += 1
+    if re.search(r"[A-Z]", pw): score += 1
+    if re.search(r"[a-z]", pw): score += 1
+    if re.search(r"\d", pw): score += 1
+    if re.search(r"[^\w\s]", pw): score += 1
+    score = min(4, score)
+    labels = ["Very weak", "Weak", "Medium", "Strong", "Very strong"]
+    colors = ["#ff4b4b", "#ff8c42", "#ffbf00", "#4caf50", "#2ecc71"]
+    return score, f"<span style='color:{colors[score]}'>{labels[score]}</span>"
+
+def _post_login(user_tuple):
+    st.session_state["user_id"] = user_tuple[0]
+    st.session_state["phone"] = user_tuple[1]
+    st.session_state["name"] = user_tuple[2]
+    st.session_state["authenticated"] = True
+    st.rerun()
+
+# ---------- Main ----------
 def home():
-    st.title("🏠 Welcome to Smart Inventory Manager")
+    st.title("🏠 Smart Inventory Manager")
 
-    # ✅ Safe reroute if login was just completed
-    if st.session_state.get("reroute_now"):
-        st.session_state.pop("reroute_now")
-        st.experimental_rerun()
+    tab_login, tab_register, tab_recover = st.tabs([
+        "🔐 Login", "📝 Register", "🔑 Recover Password"
+    ])
 
-    # --- Tabs for Login / Register ---
-    tab1, tab2 = st.tabs(["🔐 Login", "📝 Register"])
-
-    # ------------------- Login -------------------
-    with tab1:
-        st.subheader("Login to your account")
-
-        phone_login = st.text_input("📱 Phone Number", max_chars=20)
-        password_login = st.text_input("🔑 Password", type="password")
-
-        if st.button("Login"):
-            user = authenticate_user(phone_login, password_login)
-            if user:
-                st.session_state["user_id"] = user[0]
-                st.session_state["phone"] = user[1]
-                st.session_state["name"] = user[2]
-                st.session_state["authenticated"] = True
-                st.session_state["reroute_now"] = True  # 👈 flag to trigger rerun
-                st.success(f"✅ Welcome back, {user[2]}")
-            else:
-                st.error("❌ Invalid phone number or password.")
-
-    # ------------------ Register ------------------
-    with tab2:
-        st.subheader("Register a new account")
-
-        name_register = st.text_input("👤 Full Name", max_chars=50)
-        phone_register = st.text_input("📱 New Phone Number", max_chars=20)
-        password_register = st.text_input("🔑 New Password", type="password")
-
-        if st.button("Register"):
-            if not name_register.strip() or not phone_register.strip() or not password_register.strip():
-                st.warning("⚠️ All fields are required.")
-            else:
-                success = create_user(phone_register, password_register, name_register)
-                if success:
-                    st.success("✅ Account created successfully. You can now log in.")
+    # ===== LOGIN =====
+    with tab_login:
+        with st.form("login_form"):
+            phone = st.text_input("📱 Phone Number")
+            pw = st.text_input("🔑 Password", type="password")
+            if st.form_submit_button("Login"):
+                p = _normalize_phone(phone)
+                user = authenticate_user(p, pw)
+                if user:
+                    _post_login(user)
                 else:
-                    st.error("❌ Phone number already registered.")
+                    st.error("❌ Invalid phone or password.")
+
+    # ===== REGISTER =====
+    with tab_register:
+        with st.form("register_form"):
+            name = st.text_input("👤 Full Name")
+            phone = st.text_input("📱 Phone Number")
+            pw = st.text_input("🔑 Password", type="password")
+            score, label_html = _password_strength(pw)
+            st.markdown(f"Strength: {label_html}", unsafe_allow_html=True)
+            q = st.text_input("❓ Secret Question (for password recovery)")
+            a = st.text_input("💬 Secret Answer")
+            if st.form_submit_button("Create Account"):
+                if not name or not phone or not pw or not q or not a:
+                    st.warning("⚠️ All fields required.")
+                elif score < 2:
+                    st.warning("⚠️ Password too weak.")
+                else:
+                    if create_user(_normalize_phone(phone), pw, name, q.strip(), a.strip().lower()):
+                        st.success("✅ Account created. You can now log in.")
+                    else:
+                        st.error("❌ Phone already registered.")
+
+    # ===== RECOVER =====
+    with tab_recover:
+        stage = st.session_state.get("recover_stage", "enter_phone")
+
+        if stage == "enter_phone":
+            with st.form("recover_phone"):
+                phone = st.text_input("📱 Enter your phone number")
+                if st.form_submit_button("Next"):
+                    p = _normalize_phone(phone)
+                    user = get_user_by_phone(p)
+                    if not user:
+                        st.error("❌ Phone not found.")
+                    else:
+                        st.session_state["recover_phone"] = p
+                        st.session_state["recover_question"] = user[3]  # secret_question column
+                        st.session_state["recover_answer"] = user[4]    # secret_answer column
+                        st.session_state["recover_stage"] = "answer"
+                        st.rerun()
+
+        elif stage == "answer":
+            st.info(f"❓ Secret Question: {st.session_state['recover_question']}")
+            with st.form("recover_answer"):
+                ans = st.text_input("💬 Your Answer")
+                if st.form_submit_button("Verify"):
+                    if ans.strip().lower() == st.session_state["recover_answer"]:
+                        st.session_state["recover_stage"] = "reset_pw"
+                        st.rerun()
+                    else:
+                        st.error("❌ Incorrect answer.")
+
+        elif stage == "reset_pw":
+            with st.form("reset_pw_form"):
+                new_pw = st.text_input("🔑 New Password", type="password")
+                score, label_html = _password_strength(new_pw)
+                st.markdown(f"Strength: {label_html}", unsafe_allow_html=True)
+                if st.form_submit_button("Reset Password"):
+                    if score < 2:
+                        st.warning("⚠️ Password too weak.")
+                    else:
+                        update_password_by_phone(st.session_state["recover_phone"], new_pw)
+                        st.success("✅ Password updated. You can now log in.")
+                        for k in ["recover_stage", "recover_phone", "recover_question", "recover_answer"]:
+                            st.session_state.pop(k, None)
+6+

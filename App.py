@@ -1,10 +1,9 @@
-# App.py — Product-grade shell with KPIs, deep links, clean nav
-import os
+# App.py — Sleek shell with fixed-width, no-wrap nav + KPIs + deep links
 from datetime import date
-
+import os
 import streamlit as st
 
-# Pages
+# --- Pages ---
 from CalendarView import calendar_view
 from home import home
 from Inventory import inventory
@@ -12,51 +11,69 @@ from AI_Assistant import ai_assistant
 from dashboard import dashboard
 from SmartCoach import coach
 
-# DB utils
+# --- DB helpers ---
 from db import create_tables, reset_monthly_counters, get_connection, get_monthly_summary
 
-# ========= Page Config (must be first) =========
+# ================== Page config ==================
 st.set_page_config(
     page_title="Smart Inventory Manager",
     page_icon="🍴",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed",
 )
 
-# ========= Light styling tweak for a cleaner header =========
+# ================== Styles ==================
 st.markdown("""
 <style>
-/* tighter top padding */
-.block-container { padding-top: 1.2rem; }
-/* header card */
-.header-card {
-  background: linear-gradient(90deg, #0B0F2A 0%, #1A1F3C 100%);
-  border: 1px solid #0e2a45;
+/* container spacing */
+.block-container { padding-top: 1rem; }
+
+/* header wrapper */
+.header {
+  background: #0b0f2a;
+  border: 1px solid #13203a;
   border-radius: 14px;
-  padding: 12px 18px;
+  padding: 12px 16px;
   margin-bottom: 12px;
 }
-/* nav pills */
-.nav-pill {
-  display: inline-block; padding: 8px 12px; border-radius: 10px;
-  background: #121629; border: 1px solid #223; color: #dfe9f3; margin-right: 8px;
-  text-decoration: none; font-weight: 600;
+
+/* KPI cards */
+.kpi { background:#0f1428; border:1px solid #1e2a44; border-radius:12px; padding:10px 8px; text-align:center; }
+.kpi .val { font-weight:700; font-size:20px; color:#e8f2ff; }
+.kpi .lbl { font-size:12px; color:#9bb3c7; }
+
+/* nav row */
+.navbox { display:flex; gap:8px; justify-content:flex-end; flex-wrap:nowrap; }
+
+/* pill buttons made from <button> with Streamlit styles overridden */
+button[kind="secondary"] { white-space:nowrap; }  /* belt + suspenders */
+.navbtn > button {
+  min-width: 112px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 10px;
+  border: 1px solid #1e2a44 !important;
+  background: #121629 !important;
+  color: #dfe9f3 !important;
+  padding: 6px 10px !important;
 }
-.nav-pill.active { background: #00BFFF22; border-color: #00BFFF; color: #dff6ff; }
-.kpi { text-align:center; background:#111522; border:1px solid #223; border-radius:12px; padding:10px 8px; }
-.kpi .value { font-size:20px; font-weight:700; }
-.kpi .label { font-size:12px; color:#9bb3c7; }
-.profile-chip {
-  text-align:right; color:#9bd7ff; font-weight:600;
+.navbtn.active > button {
+  background: #0d2744 !important;
+  border-color: #00bfff !important;
+  color: #e8f6ff !important;
 }
+
+/* logout button sizing */
+.logout > button { padding:6px 10px !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ========= One-time DB sanity =========
+# ================== One-time DB sanity ==================
 create_tables()
 reset_monthly_counters()
 
-# ========= Helpers =========
+# ================== Page registry ==================
 PAGES = {
     "🏡 Home": calendar_view,
     "📦 Inventory": inventory,
@@ -64,9 +81,8 @@ PAGES = {
     "🤖 AI Assistant": ai_assistant,
     "📊 Dashboard": dashboard,
 }
-
 PAGE_KEYS = list(PAGES.keys())
-PAGE_ALIAS = {  # deep-link aliases
+ALIAS = {  # deep links: ?page=coach etc.
     "home": "🏡 Home",
     "inventory": "📦 Inventory",
     "coach": "🧠 Smart Coach",
@@ -74,107 +90,100 @@ PAGE_ALIAS = {  # deep-link aliases
     "dashboard": "📊 Dashboard",
 }
 
-def _get_user_name():
+# ================== Helpers ==================
+def _user_name() -> str:
     return st.session_state.get("name") or st.session_state.get("phone") or "User"
 
 def _kpis(user_id: int):
-    # Pull quick stats for header bar
     conn = get_connection(); c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM inventory WHERE user_id=?", (user_id,))
     total_items = c.fetchone()[0] or 0
-    # money lost this month and steps
     ms = get_monthly_summary(user_id)
-    used_steps = ms["used_steps"]
-    expired_steps = ms["expired_steps"]
-    money_lost_month = ms["money_lost"]
     conn.close()
-    return total_items, used_steps, expired_steps, money_lost_month
+    return total_items, ms["used_steps"], ms["expired_steps"], ms["money_lost"]
 
-def _switch_page(label: str):
+def _goto(label: str):
     st.session_state["__page"] = label
-    # tiny UX flourish so users feel something
-    st.toast(f"Navigated to {label}", icon="➡️")
+    st.toast(label.replace("📦","").replace("🏡","").replace("🧠","").replace("🤖","").replace("📊","").strip(), icon="➡️")
 
-# ========= Auth gate =========
+# ================== Auth gate ==================
 if not st.session_state.get("authenticated"):
-    # allow deep links to set a target after login
+    # store deep link target for after login
     qp = st.query_params
-    target = qp.get("page", [""])[0].lower() if hasattr(qp, "get") else ""
-    if target in PAGE_ALIAS:
-        st.session_state["post_login_target"] = PAGE_ALIAS[target]
+    want = ""
+    try:
+        want = qp.get("page", [""])[0].lower()
+    except Exception:
+        pass
+    if want in ALIAS:
+        st.session_state["post_login_target"] = ALIAS[want]
     home()
     st.stop()
 
-# ========= Handle deep links and stateful nav =========
-# 1) deep link on first load
+# ================== Initial page selection (deep link aware) ==================
 if "__page" not in st.session_state:
-    # post-login jump
     target = st.session_state.pop("post_login_target", None)
-    if target and target in PAGES:
-        st.session_state["__page"] = target
-    else:
-        # query param ?page=coach etc.
+    if not target:
         qp = st.query_params
-        target = qp.get("page", [""])[0].lower() if hasattr(qp, "get") else ""
-        st.session_state["__page"] = PAGE_ALIAS.get(target, "🏡 Home")
+        want = ""
+        try:
+            want = qp.get("page", [""])[0].lower()
+        except Exception:
+            pass
+        target = ALIAS.get(want, "🏡 Home")
+    st.session_state["__page"] = target
 
-# ========= Header with KPIs + profile =========
-user_name = _get_user_name()
-user_id = st.session_state.get("user_id")
-
+# ================== Header ==================
 with st.container():
-    st.markdown("<div class='header-card'>", unsafe_allow_html=True)
-    h1, h2, h3 = st.columns([4, 5, 3])
+    st.markdown("<div class='header'>", unsafe_allow_html=True)
+    a, b, c = st.columns([3, 6, 3], vertical_alignment="center")
 
-    # App title + nav
-    with h1:
-        st.markdown("### 💡 Smart Inventory", unsafe_allow_html=True)
-        # simple logout
-        lcol1, lcol2 = st.columns([1,1])
-        if lcol1.button("🔐 Logout"):
-            for k in ["authenticated", "user_id", "phone", "name", "__page"]:
-                st.session_state.pop(k, None)
-            st.rerun()
-        # Debug: optional DB wipe for dev (kept off by default)
-        # if lcol2.button("🧨 Dev: Wipe DB"):
-        #     if os.path.exists("inventory.db"): os.remove("inventory.db")
-        #     st.toast("DB wiped. Restarting.", icon="🧹"); st.rerun()
+    with a:
+        st.markdown("### 💡 Smart Inventory")
+        lcol = st.columns(2)
+        with lcol[0]:
+            # Logout
+            if st.button("🔐 Logout", key="logout", use_container_width=False):
+                for k in ["authenticated", "user_id", "phone", "name", "__page", "post_login_target"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
 
-    # KPIs
-    with h2:
-        if user_id:
-            items, used, expired, lost = _kpis(user_id)
-        else:
-            items, used, expired, lost = 0, 0, 0, 0.0
+    with b:
+        # KPIs
+        uid = st.session_state.get("user_id")
+        items, used, expired, lost = (0, 0, 0, 0.0)
+        if uid:
+            items, used, expired, lost = _kpis(uid)
         k1, k2, k3, k4 = st.columns(4)
-        with k1: st.markdown(f"<div class='kpi'><div class='value'>{items}</div><div class='label'>Items</div></div>", unsafe_allow_html=True)
-        with k2: st.markdown(f"<div class='kpi'><div class='value'>{used}</div><div class='label'>Used steps (mo)</div></div>", unsafe_allow_html=True)
-        with k3: st.markdown(f"<div class='kpi'><div class='value'>{expired}</div><div class='label'>Expired steps (mo)</div></div>", unsafe_allow_html=True)
-        with k4: st.markdown(f"<div class='kpi'><div class='value'>₪{lost:.2f}</div><div class='label'>Money lost (mo)</div></div>", unsafe_allow_html=True)
+        with k1: st.markdown(f"<div class='kpi'><div class='val'>{items}</div><div class='lbl'>Items</div></div>", unsafe_allow_html=True)
+        with k2: st.markdown(f"<div class='kpi'><div class='val'>{used}</div><div class='lbl'>Used steps (mo)</div></div>", unsafe_allow_html=True)
+        with k3: st.markdown(f"<div class='kpi'><div class='val'>{expired}</div><div class='lbl'>Expired steps (mo)</div></div>", unsafe_allow_html=True)
+        with k4: st.markdown(f"<div class='kpi'><div class='val'>₪{lost:.2f}</div><div class='lbl'>Money lost (mo)</div></div>", unsafe_allow_html=True)
 
-    # Profile + quick nav
-    with h3:
-        st.markdown(f"<div class='profile-chip'>👋 {user_name}</div>", unsafe_allow_html=True)
-        # nav pills
-        nav_row = st.columns(5)
-        labels = PAGE_KEYS
-        for i, lab in enumerate(labels):
-            active = "active" if st.session_state["__page"] == lab else ""
-            if nav_row[i].button(lab, key=f"nav_{i}"):
-                _switch_page(lab)
+    with c:
+        st.markdown(f"<div style='text-align:right;color:#9bd7ff;font-weight:600;'>👋 {_user_name()}</div>", unsafe_allow_html=True)
+        # Fixed-width, no-wrap nav
+        n1, n2, n3, n4, n5 = st.columns(5)
+        nav_cols = [n1, n2, n3, n4, n5]
+        for i, label in enumerate(PAGE_KEYS):
+            active = " active" if st.session_state["__page"] == label else ""
+            with nav_cols[i]:
+                st.markdown(f"<div class='navbtn{active}'>", unsafe_allow_html=True)
+                if st.button(label, key=f"nav_{i}", use_container_width=True):
+                    _goto(label)
+                st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ========= Render selected page =========
+# ================== Render current page ==================
 current = st.session_state["__page"]
-render_fn = PAGES.get(current, calendar_view)
-render_fn()
+PAGES.get(current, calendar_view)()
 
-# ========= Footer =========
-st.markdown("""
-<hr style="opacity:0.2">
+# ================== Footer ==================
+st.markdown(f"""
+<hr style="opacity:0.15">
 <div style="font-size:12px;color:#93a4b4;display:flex;justify-content:space-between;">
-  <div>v1.4 • {} • {}</div>
-  <div>Made with questionable life choices and Python.</div>
+  <div>v1.5 • {date.today().isoformat()} • {current}</div>
+  <div>Made with Python and questionable life choices.</div>
 </div>
-""".format(date.today().isoformat(), current), unsafe_allow_html=True)
+""", unsafe_allow_html=True)
