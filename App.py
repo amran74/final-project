@@ -1,4 +1,4 @@
-# App.py — Sleek shell with fixed-width, no-wrap nav + KPIs + deep links + post-login redirect
+# App.py — Sleek shell with fixed-width, no-wrap nav + KPIs + deep links + bulletproof post-login redirect
 from datetime import date
 import streamlit as st
 
@@ -105,6 +105,13 @@ def _goto(label: str):
     st.session_state["__page"] = label
     st.toast(label.replace("📦","").replace("🏡","").replace("🧠","").replace("🤖","").replace("📊","").strip(), icon="➡️")
 
+# ================== Global post-login interceptor ==================
+# If home.py set "just_logged_in", force page to Home and rerun no matter where we are.
+if st.session_state.get("just_logged_in"):
+    st.session_state["__page"] = "🏡 Home"
+    st.session_state.pop("just_logged_in", None)
+    st.rerun()
+
 # ================== Auth gate ==================
 if not st.session_state.get("authenticated"):
     # store deep link target for after login
@@ -119,13 +126,7 @@ if not st.session_state.get("authenticated"):
 
     # render login/register/recover
     home()
-
-    # If login just succeeded inside home(), jump to 🏡 Home immediately
-    if st.session_state.get("just_logged_in"):
-        st.session_state["__page"] = "🏡 Home"
-        st.session_state.pop("just_logged_in", None)
-        st.rerun()
-
+    # if login happens inside home(), the global interceptor above will catch it on rerun
     st.stop()
 
 # ================== Initial page selection (deep link aware) ==================
@@ -192,7 +193,7 @@ PAGES.get(current, calendar_view)()
 st.markdown(f"""
 <hr style="opacity:0.15">
 <div style="font-size:12px;color:#93a4b4;display:flex;justify-content:space-between;">
-  <div>v1.6 • {date.today().isoformat()} • {current}</div>
+  <div>v1.7 • {date.today().isoformat()} • {current}</div>
   <div>Made with Python and questionable life choices.</div>
 </div>
 """, unsafe_allow_html=True)
