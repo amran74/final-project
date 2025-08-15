@@ -44,10 +44,16 @@ def home():
         if st.button("Login"):
             user = db.authenticate_user(phone, password)
             if user:
+                # ✅ Set session state for authentication
+                st.session_state["authenticated"] = True
                 st.session_state["user_id"] = user[0]
                 st.session_state["phone"] = user[1]
                 st.session_state["name"] = user[2]
-                st.success(f"✅ Welcome back, {user[2]}!")
+
+                # ✅ Force homepage after login
+                st.session_state["__page"] = "🏡 Home"
+
+                # 🚀 Rerun immediately to go to homepage
                 st.rerun()
 
             else:
