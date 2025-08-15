@@ -21,44 +21,69 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ================== Styles ==================
+# ================== Styles (nav no-wrap + compact, consistent pills) ==================
 st.markdown("""
 <style>
-.navbtn > button {
-    min-width: 130px !important;
-    max-width: 130px !important;
-    height: 42px !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    gap: 6px !important;
-    font-size: 14px !important;
-    font-weight: 500 !important;
-    padding: 0 10px !important;
-    background: #121629 !important;
-    border-radius: 10px !important;
-    border: 1px solid #1e2a44 !important;
-    color: #dfe9f3 !important;
-    white-space: nowrap !important; /* THIS stops wrapping */
-    overflow: hidden !important;
-    text-overflow: ellipsis !important;
+/* Layout polish */
+.block-container { padding-top: 1rem; }
+.header { background:#0b0f2a; border:1px solid #13203a; border-radius:14px; padding:12px 16px; margin-bottom:12px; }
+.kpi { background:#0f1428; border:1px solid #1e2a44; border-radius:12px; padding:10px 8px; text-align:center; }
+.kpi .val { font-weight:700; font-size:20px; color:#e8f2ff; }
+.kpi .lbl { font-size:12px; color:#9bb3c7; }
+
+/* Tell Streamlit columns that contain nav buttons to stop stretching and wrapping */
+div[data-testid="column"] > div:has(.navbtn) {
+  flex: 0 0 auto !important;       /* don't grow or shrink */
+  min-width: 0 !important;
+  white-space: nowrap !important;   /* keep children on one line */
+}
+
+/* The nav pill itself */
+.navbtn { display:inline-block; }
+
+/* Streamlit's button gets hard overrides */
+.navbtn > button,
+div[data-testid="column"] .navbtn > button {
+  min-width: 132px !important;
+  max-width: 132px !important;
+  height: 42px !important;
+  padding: 0 12px !important;
+
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+
+  border-radius: 10px !important;
+  border: 1px solid #1e2a44 !important;
+  background: #121629 !important;
+  color: #dfe9f3 !important;
+  font-size: 14px !important;
+  font-weight: 500 !important;
+
+  white-space: nowrap !important;    /* force single line */
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  line-height: 1 !important;
+}
+
+/* Inner elements inside Streamlit's button sometimes re-wrap; shut that down */
+.navbtn > button * {
+  white-space: nowrap !important;
 }
 
 /* Active state */
 .navbtn.active > button {
-    background: #0d2744 !important;
-    border-color: #00bfff !important;
-    color: #e8f6ff !important;
+  background: #0d2744 !important;
+  border-color: #00bfff !important;
+  color: #e8f6ff !important;
 }
 
-/* Remove weird Streamlit hover shadow */
-.navbtn > button:hover {
-    border-color: #00bfff !important;
-}
+/* Hover focus */
+.navbtn > button:hover { border-color:#00bfff !important; }
+.navbtn > button:focus { outline:none !important; box-shadow:none !important; }
 </style>
 """, unsafe_allow_html=True)
-
-
 
 # ================== One-time DB sanity ==================
 create_tables()
@@ -73,7 +98,7 @@ PAGES = {
     "📊 Dashboard": dashboard,
 }
 PAGE_KEYS = list(PAGES.keys())
-ALIAS = {  # deep links: ?page=coach etc.
+ALIAS = {
     "home": "🏡 Home",
     "inventory": "📦 Inventory",
     "coach": "🧠 Smart Coach",
@@ -98,7 +123,6 @@ def _goto(label: str):
     st.toast(label.replace("📦","").replace("🏡","").replace("🧠","").replace("🤖","").replace("📊","").strip(), icon="➡️")
 
 # ================== Global post-login interceptor ==================
-# If home.py just set the flag, force switch to Home and rerun, no matter what.
 if st.session_state.get("just_logged_in"):
     st.session_state["__page"] = "🏡 Home"
     st.session_state.pop("just_logged_in", None)
@@ -106,7 +130,6 @@ if st.session_state.get("just_logged_in"):
 
 # ================== Auth gate ==================
 if not st.session_state.get("authenticated"):
-    # remember deep link for after login
     qp = st.query_params
     want = ""
     try:
@@ -115,11 +138,7 @@ if not st.session_state.get("authenticated"):
         pass
     if want in ALIAS:
         st.session_state["post_login_target"] = ALIAS[want]
-
-    # render login/register/recover
     home()
-    # when login succeeds, home.py sets `authenticated=True` and `just_logged_in=True`;
-    # the global interceptor above will catch it on the next run.
     st.stop()
 
 # ================== Jump handler (from CalendarView quick buttons) ==================
@@ -138,7 +157,6 @@ if st.session_state.get("jump"):
 
 # ================== Initial page selection (deep link aware) ==================
 if "__page" not in st.session_state:
-    # 1) honor post-login deep link, else 2) honor URL ?page=..., else 3) default Home
     target = st.session_state.pop("post_login_target", None)
     if not target:
         qp = st.query_params
@@ -159,14 +177,12 @@ with st.container():
         st.markdown("### 💡 Smart Inventory")
         lcol = st.columns(2)
         with lcol[0]:
-            # Logout
             if st.button("🔐 Logout", key="logout", use_container_width=False):
                 for k in ["authenticated", "user_id", "phone", "name", "__page", "post_login_target"]:
                     st.session_state.pop(k, None)
                 st.rerun()
 
     with b:
-        # KPIs
         uid = st.session_state.get("user_id")
         items, used, expired, lost = (0, 0, 0, 0.0)
         if uid:
@@ -179,7 +195,7 @@ with st.container():
 
     with c:
         st.markdown(f"<div style='text-align:right;color:#9bd7ff;font-weight:600;'>👋 {_user_name()}</div>", unsafe_allow_html=True)
-        # Fixed-width, no-wrap nav
+        # Fixed-width, no-wrap nav (kept in columns, but CSS forces single-line buttons)
         n1, n2, n3, n4, n5 = st.columns(5)
         nav_cols = [n1, n2, n3, n4, n5]
         for i, label in enumerate(PAGE_KEYS):
@@ -200,7 +216,7 @@ PAGES.get(current, calendar_view)()
 st.markdown(f"""
 <hr style="opacity:0.15">
 <div style="font-size:12px;color:#93a4b4;display:flex;justify-content:space-between;">
-  <div>v1.8 • {date.today().isoformat()} • {current}</div>
+  <div>v1.9 • {date.today().isoformat()} • {current}</div>
   <div>Made with Python and questionable life choices.</div>
 </div>
 """, unsafe_allow_html=True)
