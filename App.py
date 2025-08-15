@@ -92,10 +92,10 @@ reset_monthly_counters()
 # ================== Page registry ==================
 PAGES = {
     "🏡 Home": calendar_view,
-    "📦 Inventory": inventory,
-    "🧠 Smart Coach": coach,
-    "🤖 AI Assistant": ai_assistant,
-    "📊 Dashboard": dashboard,
+    "📦 Inv": inventory,
+    "🧠 Coach": coach,
+    "🤖 AI": ai_assistant,
+    "📊 Stats": dashboard,
 }
 PAGE_KEYS = list(PAGES.keys())
 ALIAS = {
