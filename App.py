@@ -24,49 +24,37 @@ st.set_page_config(
 # ================== Styles ==================
 st.markdown("""
 <style>
-/* container spacing */
-.block-container { padding-top: 1rem; }
-
-/* header wrapper */
-.header {
-  background: #0b0f2a;
-  border: 1px solid #13203a;
-  border-radius: 14px;
-  padding: 12px 16px;
-  margin-bottom: 12px;
-}
-
-/* KPI cards */
-.kpi { background:#0f1428; border:1px solid #1e2a44; border-radius:12px; padding:10px 8px; text-align:center; }
-.kpi .val { font-weight:700; font-size:20px; color:#e8f2ff; }
-.kpi .lbl { font-size:12px; color:#9bb3c7; }
-
-/* nav row */
-.navbox { display:flex; gap:8px; justify-content:flex-end; flex-wrap:nowrap; }
-
-/* pill buttons made from <button> with Streamlit styles overridden */
-button[kind="secondary"] { white-space:nowrap; }  /* belt + suspenders */
+/* Force all nav buttons to same width */
 .navbtn > button {
-  min-width: 112px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  border-radius: 10px;
-  border: 1px solid #1e2a44 !important;
-  background: #121629 !important;
-  color: #dfe9f3 !important;
-  padding: 6px 10px !important;
-}
-.navbtn.active > button {
-  background: #0d2744 !important;
-  border-color: #00bfff !important;
-  color: #e8f6ff !important;
+    min-width: 120px !important;
+    max-width: 120px !important;
+    text-align: center !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 6px 8px !important;
+    font-size: 14px !important;
 }
 
-/* logout button sizing */
-.logout > button { padding:6px 10px !important; }
+/* Active button highlight */
+.navbtn.active > button {
+    background: #0d2744 !important;
+    border-color: #00bfff !important;
+    color: #e8f6ff !important;
+}
+
+/* Make icons not push text weirdly */
+.navbtn > button > div {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
 </style>
 """, unsafe_allow_html=True)
+
 
 # ================== One-time DB sanity ==================
 create_tables()
