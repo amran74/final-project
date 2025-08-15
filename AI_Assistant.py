@@ -1,133 +1,146 @@
-# AI_Assistant.py — Next-Level AI Cooking & Inventory Brain
+# AI_Assistant.py — Premium AI integration for Smart Inventory
 import streamlit as st
 import openai
-from db import get_connection, use_item, expire_item, update_item
+import db
 from datetime import date
 
-# ======================
-# CONFIG
-# ======================
-MODEL = "gpt-4.1"  # best balance for reasoning + structured output
+st.set_page_config(page_title="🤖 AI Assistant", page_icon="🤖", layout="wide")
+
+# ==============================
+# Setup OpenAI
+# ==============================
 openai.api_key = st.secrets.get("OPENAI_API_KEY", "")
 
-# ======================
-# HELPERS
-# ======================
-def _get_inventory(user_id):
-    conn = get_connection()
+MODEL = "gpt-4.1"
+
+# ==============================
+# Helper: Get inventory summary
+# ==============================
+def get_inventory_summary(user_id):
+    conn = db.get_connection()
     c = conn.cursor()
-    c.execute("""
-        SELECT id, name, amount, unit, stable, expiration, price_per_unit
-        FROM inventory WHERE user_id=?
-    """, (user_id,))
+    c.execute("SELECT name, amount, unit, expiration, price_per_unit FROM inventory WHERE user_id=?", (user_id,))
     items = c.fetchall()
     conn.close()
-    return [
-        {"id": i[0], "name": i[1], "amount": i[2], "unit": i[3],
-         "stable": bool(i[4]), "expiration": i[5], "price": i[6]}
-        for i in items
-    ]
+    return items
 
-def _ai_complete(prompt, sys_prompt="You are a helpful cooking and inventory assistant."):
-    resp = openai.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.7
-    )
-    return resp.choices[0].message.content.strip()
+# ==============================
+# Helper: Pretty inventory text
+# ==============================
+def format_inventory_for_ai(items):
+    lines = []
+    today = date.today()
+    for name, amount, unit, exp, price in items:
+        exp_days = ""
+        try:
+            exp_days = (date.fromisoformat(exp) - today).days
+            exp_days = f"{exp_days} days left" if exp_days >= 0 else f"Expired {-exp_days} days ago"
+        except:
+            exp_days = "Unknown expiry"
+        lines.append(f"{name} — {amount} {unit}, expires in {exp_days}, ₪{price:.2f} per {unit}")
+    return "\n".join(lines) if lines else "No items in inventory."
 
-def _add_item(user_id, name, amount=1, unit="pcs", price=0.0, stable=0):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO inventory (user_id, name, amount, unit, price_per_unit, stable, expiration)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, name, amount, unit, price, stable, date.today().isoformat()))
-    conn.commit()
-    conn.close()
+# ==============================
+# Core AI query function
+# ==============================
+def ask_ai(prompt):
+    try:
+        response = openai.ChatCompletion.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": "You are a helpful kitchen and inventory assistant with expert cooking and budgeting skills."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=800
+        )
+        return response.choices[0].message["content"].strip()
+    except Exception as e:
+        return f"⚠ Error: {str(e)}"
 
-# ======================
-# PAGE
-# ======================
-def ai_assistant():
-    st.title("🤖 AI Cooking & Pantry Assistant")
+# ==============================
+# Page UI
+# ==============================
+st.title("🤖 Smart AI Assistant")
+st.caption("Powered by GPT-4.1 — Connected to your live inventory")
 
-    if "user_id" not in st.session_state:
-        st.error("Please login first.")
-        st.stop()
+if "user_id" not in st.session_state:
+    st.warning("⚠ Please log in to use the AI Assistant.")
+    st.stop()
 
-    user_id = st.session_state["user_id"]
-    inventory = _get_inventory(user_id)
+user_id = st.session_state["user_id"]
 
-    tabs = st.tabs(["🍲 AI Recipe Maker", "💡 AI Waste & Cost Insights"])
+mode = st.radio(
+    "Choose AI Mode:",
+    [
+        "🍳 Smart Recipe Maker",
+        "📅 Meal Planner",
+        "💬 Pantry Chat",
+        "💰 Cost Optimization"
+    ],
+    horizontal=True
+)
 
-    # ==================================
-    # TAB 1 — Recipe Maker
-    # ==================================
-    with tabs[0]:
-        st.subheader("Smart Pantry Recipe Generator")
+inventory_items = get_inventory_summary(user_id)
+inventory_text = format_inventory_for_ai(inventory_items)
 
-        mode = st.radio("Use items from:", ["All Items", "Only Pantry (stable=1)", "Custom Selection"], horizontal=True)
+# ==============================
+# Smart Recipe Maker
+# ==============================
+if mode == "🍳 Smart Recipe Maker":
+    st.subheader("Create Recipes from Your Inventory")
+    meal_type = st.selectbox("Meal Type", ["Any", "Breakfast", "Lunch", "Dinner", "Snack"])
+    servings = st.number_input("Servings", min_value=1, value=2)
 
-        if mode == "All Items":
-            chosen_items = inventory
-        elif mode == "Only Pantry (stable=1)":
-            chosen_items = [i for i in inventory if i["stable"]]
-        else:
-            names = [f"{i['name']} ({i['amount']} {i['unit']})" for i in inventory]
-            selected = st.multiselect("Select items to include:", names)
-            chosen_items = [i for i, name in zip(inventory, names) if name in selected]
+    if st.button("Generate Recipe"):
+        prompt = f"""
+        I have the following inventory:\n{inventory_text}\n
+        Please suggest a {meal_type} recipe for {servings} servings using mainly items I already have.
+        If items are missing, list them clearly as 'MISSING INGREDIENTS:' at the end.
+        """
+        recipe = ask_ai(prompt)
+        st.markdown("### 🍽 Suggested Recipe")
+        st.write(recipe)
 
-        if st.button("Generate Recipes with AI 🍳", type="primary"):
-            if not chosen_items:
-                st.warning("No items selected!")
-            else:
-                pantry_list = [f"{i['name']} - {i['amount']} {i['unit']}" for i in chosen_items]
-                prompt = f"""
-                You are an AI chef. Using ONLY these pantry items:\n{pantry_list}\n
-                Suggest 3 unique recipes. Each recipe must include:
-                - Title
-                - Step-by-step instructions
-                - Nutritional info per serving
-                - Missing ingredients list (if any)
-                Format clearly.
-                """
-                recipes = _ai_complete(prompt)
-                st.markdown("### 🍽 AI Recipes")
-                st.write(recipes)
+# ==============================
+# Meal Planner
+# ==============================
+elif mode == "📅 Meal Planner":
+    st.subheader("Plan Your Meals")
+    days = st.slider("Number of days", 1, 7, 3)
+    if st.button("Generate Meal Plan"):
+        prompt = f"""
+        My inventory:\n{inventory_text}\n
+        Plan healthy, budget-friendly meals for {days} days, prioritizing items close to expiry.
+        Include breakfast, lunch, and dinner for each day.
+        """
+        plan = ask_ai(prompt)
+        st.markdown("### 📅 Meal Plan")
+        st.write(plan)
 
-                # Extract missing items for quick add
-                if "Missing ingredients" in recipes:
-                    st.markdown("#### ➕ Add Missing Ingredients to Inventory")
-                    missing_input = st.text_area("Paste missing ingredients here (one per line):")
-                    if st.button("Add to Inventory"):
-                        for line in missing_input.split("\n"):
-                            if line.strip():
-                                _add_item(user_id, line.strip(), 1, "pcs", 0.0, 0)
-                        st.success("Added missing items to inventory!")
+# ==============================
+# Pantry Chat
+# ==============================
+elif mode == "💬 Pantry Chat":
+    st.subheader("Chat with Your Pantry")
+    user_q = st.text_area("Ask me anything about your pantry or cooking:")
+    if st.button("Ask"):
+        prompt = f"My inventory:\n{inventory_text}\nUser question: {user_q}"
+        answer = ask_ai(prompt)
+        st.markdown("### 💡 Answer")
+        st.write(answer)
 
-    # ==================================
-    # TAB 2 — Waste & Cost Insights
-    # ==================================
-    with tabs[1]:
-        st.subheader("AI Analysis of Your Inventory")
-
-        if st.button("Analyze My Pantry & Usage 💡"):
-            inv_text = "\n".join(
-                [f"{i['name']} - {i['amount']} {i['unit']} - expires {i['expiration']} - price/unit {i['price']}"
-                 for i in inventory]
-            )
-            prompt = f"""
-            You are an AI inventory and cost optimization expert.
-            Analyze this inventory list:\n{inv_text}\n
-            Provide:
-            1. Items at high risk of expiry soon and ideas to use them up.
-            2. Suggestions to save money (buy in bulk, substitute, skip).
-            3. Ideas for reducing waste in the next month.
-            """
-            insights = _ai_complete(prompt)
-            st.markdown("### 📊 AI Insights")
-            st.write(insights)
+# ==============================
+# Cost Optimization
+# ==============================
+elif mode == "💰 Cost Optimization":
+    st.subheader("Analyze & Optimize Costs")
+    if st.button("Analyze"):
+        prompt = f"""
+        My inventory:\n{inventory_text}\n
+        Analyze the cost-effectiveness of my inventory.
+        Suggest cheaper substitutes without sacrificing too much quality, and give cost per meal ideas.
+        """
+        advice = ask_ai(prompt)
+        st.markdown("### 💰 Optimization Suggestions")
+        st.write(advice)

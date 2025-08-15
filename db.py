@@ -409,6 +409,67 @@ def get_monthly_summary(user_id: int, month_key: Optional[str] = None) -> dict:
         "expired_steps": int(row[1] or 0),
         "money_lost": round(row[2] or 0.0, 2)
     }
+# ==============================
+# Shopping list table & helpers
+# ==============================
+
+def create_shopping_list_table() -> None:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS shopping_list (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            item_name TEXT NOT NULL,
+            quantity REAL DEFAULT 1,
+            unit TEXT DEFAULT 'pcs',
+            added_at TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+# Run this so the table exists
+create_shopping_list_table()
+
+def add_to_shopping_list(user_id: int, item_name: str, quantity: float = 1, unit: str = "pcs") -> None:
+    """Add an item to the shopping list for the given user."""
+    from datetime import datetime
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO shopping_list (user_id, item_name, quantity, unit, added_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (user_id, item_name, quantity, unit, datetime.now().isoformat(timespec="seconds")))
+    conn.commit()
+    conn.close()
+
+def get_shopping_list(user_id: int):
+    """Retrieve all shopping list items for the given user."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT id, item_name, quantity, unit, added_at FROM shopping_list WHERE user_id = ?", (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def remove_from_shopping_list(item_id: int) -> None:
+    """Remove a shopping list item by its ID."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM shopping_list WHERE id = ?", (item_id,))
+    conn.commit()
+    conn.close()
+
+def clear_shopping_list(user_id: int) -> None:
+    """Clear the entire shopping list for a given user."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM shopping_list WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
 
 # Ensure tables exist and migrations run at import time
 create_tables()
