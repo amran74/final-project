@@ -1,11 +1,14 @@
-# App.py — Sleek shell with fixed-width, no-wrap nav + KPIs + deep links + bulletproof post-login redirect
-from datetime import date
-import streamlit as st
-
 # --- Pages ---
 from CalendarView import calendar_view
 from home import home
-from Inventory import inventory
+
+try:
+    # Works if the file is named Inventory.py (capital I)
+    from Inventory import inventory
+except ModuleNotFoundError:
+    # Fallback if it's inventory.py (lowercase i)
+    from inventory import inventory
+
 from AI_Assistant import ai_assistant
 from dashboard import dashboard
 from SmartCoach import coach
