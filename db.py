@@ -33,6 +33,34 @@ def create_tables() -> None:
         )
     """)
 
+    # Inventory
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS inventory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            expiration TEXT NOT NULL,
+            type TEXT,
+            amount REAL DEFAULT 1,
+            unit TEXT DEFAULT 'pcs',
+            used_count INTEGER DEFAULT 0,
+            expired_count INTEGER DEFAULT 0,
+            last_reset_month TEXT DEFAULT '',
+            stable INTEGER DEFAULT 0,
+            price_per_unit REAL DEFAULT 0
+        )
+    """)
+
+    # Additive migrations (extend table safely)
+    _ensure_column(c, "inventory", "frozen_until",
+                   "ALTER TABLE inventory ADD COLUMN frozen_until TEXT")
+    _ensure_column(c, "inventory", "perishability",
+                   "ALTER TABLE inventory ADD COLUMN perishability INTEGER DEFAULT 2")
+
+    conn.commit()
+    conn.close()
+
+
     # Add secret question & answer columns if missing
     _ensure_column(c, "users", "secret_question", "ALTER TABLE users ADD COLUMN secret_question TEXT")
     _ensure_column(c, "users", "secret_answer", "ALTER TABLE users ADD COLUMN secret_answer TEXT")
