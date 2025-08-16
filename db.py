@@ -182,47 +182,6 @@ def update_password_by_phone(phone: str, new_password: str) -> bool:
     return success
 
 # ==============================
-# Inventory updates and monthly reset
-# ==============================
-
-def update_item(item_id: int, name: str, expiration: str, food_type: str,
-                amount: float, unit: str, price_per_unit: Optional[float] = None) -> None:
-    conn = get_connection()
-    c = conn.cursor()
-    if price_per_unit is None:
-        c.execute("""
-            UPDATE inventory
-            SET name = ?, expiration = ?, type = ?, amount = ?, unit = ?
-            WHERE id = ?
-        """, (name, expiration, food_type, amount, unit, item_id))
-    else:
-        c.execute("""
-            UPDATE inventory
-            SET name = ?, expiration = ?, type = ?, amount = ?, unit = ?, price_per_unit = ?
-            WHERE id = ?
-        """, (name, expiration, food_type, amount, unit, price_per_unit, item_id))
-    conn.commit()
-    conn.close()
-
-def reset_monthly_counters() -> None:
-    conn = get_connection()
-    c = conn.cursor()
-    current_month = date.today().strftime("%Y-%m")
-    c.execute("SELECT id, last_used_month FROM inventory")
-    rows = c.fetchall()
-    for item_id, last_month in rows:
-        if last_month != current_month:
-            c.execute("""
-                UPDATE inventory
-                SET used_count = 0,
-                    expired_count = 0,
-                    last_used_month = ?
-                WHERE id = ?
-            """, (current_month, item_id))
-    conn.commit()
-    conn.close()
-
-# ==============================
 # Unit math
 # ==============================
 
@@ -452,44 +411,6 @@ def get_monthly_summary(user_id: int, month_key: Optional[str] = None) -> dict:
     }
 
 # ==============================
-# Shopping list helpers
+# Ensure schema on import
 # ==============================
-
-def create_shopping_list_table() -> None:
-    # Kept for backward compatibility. Tables are already created in create_tables().
-    pass
-
-def add_to_shopping_list(user_id: int, item_name: str, quantity: float = 1, unit: str = "pcs") -> None:
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO shopping_list (user_id, item_name, quantity, unit, added_at)
-        VALUES (?, ?, ?, ?, ?)
-    """, (user_id, item_name, quantity, unit, datetime.now().isoformat(timespec="seconds")))
-    conn.commit()
-    conn.close()
-
-def get_shopping_list(user_id: int):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT id, item_name, quantity, unit, added_at FROM shopping_list WHERE user_id = ?", (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def remove_from_shopping_list(item_id: int) -> None:
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM shopping_list WHERE id = ?", (item_id,))
-    conn.commit()
-    conn.close()
-
-def clear_shopping_list(user_id: int) -> None:
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM shopping_list WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
-
-# Ensure tables exist and migrations run at import time
 create_tables()
