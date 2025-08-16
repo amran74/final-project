@@ -1,4 +1,4 @@
-# db.py
+# db.py — cleaned and safe
 import sqlite3
 from datetime import datetime, date
 from typing import Optional, Tuple
@@ -10,7 +10,25 @@ DB_PATH = "inventory.db"
 # ==============================
 
 def get_connection() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH)
+    con.execute("PRAGMA foreign_keys = ON")
+    return con
+
+# ==============================
+# Safe additive migration helper
+# ==============================
+
+def _ensure_column(c: sqlite3.Cursor, table: str, col: str, ddl: str) -> None:
+    """
+    Add column if missing, using PRAGMA table_info instead of selecting a non-existent column.
+    `ddl` must be a full: ALTER TABLE "<table>" ADD COLUMN "<col>" <TYPE ...>
+    """
+    table_quoted = table.strip().strip('"')
+    col_quoted = col.strip().strip('"')
+    c.execute(f'PRAGMA table_info("{table_quoted}")')
+    existing = {row[1] for row in c.fetchall()}  # row[1] is column name
+    if col_quoted not in existing:
+        c.execute(ddl)
 
 # ==============================
 # Schema / Migrations
@@ -19,11 +37,12 @@ def get_connection() -> sqlite3.Connection:
 def create_tables() -> None:
     """
     Create base tables and apply additive migrations without destroying existing data.
+    Order matters: create base, then extend with _ensure_column.
     """
     conn = get_connection()
     c = conn.cursor()
 
-    # Users
+    # --- Users (base) ---
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,39 +52,13 @@ def create_tables() -> None:
         )
     """)
 
-    # Inventory
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS inventory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            expiration TEXT NOT NULL,
-            type TEXT,
-            amount REAL DEFAULT 1,
-            unit TEXT DEFAULT 'pcs',
-            used_count INTEGER DEFAULT 0,
-            expired_count INTEGER DEFAULT 0,
-            last_reset_month TEXT DEFAULT '',
-            stable INTEGER DEFAULT 0,
-            price_per_unit REAL DEFAULT 0
-        )
-    """)
+    # Users extras
+    _ensure_column(c, "users", "secret_question",
+                   'ALTER TABLE "users" ADD COLUMN "secret_question" TEXT')
+    _ensure_column(c, "users", "secret_answer",
+                   'ALTER TABLE "users" ADD COLUMN "secret_answer" TEXT')
 
-    # Additive migrations (extend table safely)
-    _ensure_column(c, "inventory", "frozen_until",
-                   "ALTER TABLE inventory ADD COLUMN frozen_until TEXT")
-    _ensure_column(c, "inventory", "perishability",
-                   "ALTER TABLE inventory ADD COLUMN perishability INTEGER DEFAULT 2")
-
-    conn.commit()
-    conn.close()
-
-
-    # Add secret question & answer columns if missing
-    _ensure_column(c, "users", "secret_question", "ALTER TABLE users ADD COLUMN secret_question TEXT")
-    _ensure_column(c, "users", "secret_answer", "ALTER TABLE users ADD COLUMN secret_answer TEXT")
-
-    # Inventory (base, matching user's original fields)
+    # --- Inventory (base) ---
     c.execute("""
         CREATE TABLE IF NOT EXISTS inventory (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,37 +77,56 @@ def create_tables() -> None:
         )
     """)
 
-    # Additive inventory migrations
-    _ensure_column(c, "inventory", "money_lost", "ALTER TABLE inventory ADD COLUMN money_lost REAL DEFAULT 0.0")
+    # Inventory extras (additive, safe)
+    _ensure_column(c, "inventory", "money_lost",
+                   'ALTER TABLE "inventory" ADD COLUMN "money_lost" REAL DEFAULT 0.0')
+    _ensure_column(c, "inventory", "frozen_until",
+                   'ALTER TABLE "inventory" ADD COLUMN "frozen_until" TEXT')
+    _ensure_column(c, "inventory", "perishability",
+                   'ALTER TABLE "inventory" ADD COLUMN "perishability" INTEGER DEFAULT 2')
 
-    # Usage log (legacy compatible)
+    # --- Usage log (base; legacy compatible) ---
     c.execute("""
         CREATE TABLE IF NOT EXISTS usage_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             item_id INTEGER,
-            used_date TEXT,          -- legacy
-            used_count INTEGER       -- legacy
+            used_date TEXT,       -- legacy
+            used_count INTEGER    -- legacy
         )
     """)
 
-    # Enrich usage_log with modern fields (non-destructive)
-    _ensure_column(c, "usage_log", "event_type",   "ALTER TABLE usage_log ADD COLUMN event_type TEXT")
-    _ensure_column(c, "usage_log", "quantity",     "ALTER TABLE usage_log ADD COLUMN quantity REAL")
-    _ensure_column(c, "usage_log", "unit",         "ALTER TABLE usage_log ADD COLUMN unit TEXT")
-    _ensure_column(c, "usage_log", "step_count",   "ALTER TABLE usage_log ADD COLUMN step_count INTEGER")
-    _ensure_column(c, "usage_log", "value_shekel", "ALTER TABLE usage_log ADD COLUMN value_shekel REAL")
-    _ensure_column(c, "usage_log", "ts",           "ALTER TABLE usage_log ADD COLUMN ts TEXT")
-    _ensure_column(c, "usage_log", "month_key",    "ALTER TABLE usage_log ADD COLUMN month_key TEXT")
+    # Usage_log extras (modern fields; additive, safe)
+    _ensure_column(c, "usage_log", "event_type",
+                   'ALTER TABLE "usage_log" ADD COLUMN "event_type" TEXT')
+    _ensure_column(c, "usage_log", "quantity",
+                   'ALTER TABLE "usage_log" ADD COLUMN "quantity" REAL')
+    _ensure_column(c, "usage_log", "unit",
+                   'ALTER TABLE "usage_log" ADD COLUMN "unit" TEXT')
+    _ensure_column(c, "usage_log", "step_count",
+                   'ALTER TABLE "usage_log" ADD COLUMN "step_count" INTEGER')
+    _ensure_column(c, "usage_log", "value_shekel",
+                   'ALTER TABLE "usage_log" ADD COLUMN "value_shekel" REAL')
+    _ensure_column(c, "usage_log", "ts",
+                   'ALTER TABLE "usage_log" ADD COLUMN "ts" TEXT')
+    _ensure_column(c, "usage_log", "month_key",
+                   'ALTER TABLE "usage_log" ADD COLUMN "month_key" TEXT')
+
+    # --- Shopping list (base) ---
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS shopping_list (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            item_name TEXT NOT NULL,
+            quantity REAL DEFAULT 1,
+            unit TEXT DEFAULT 'pcs',
+            added_at TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+    """)
 
     conn.commit()
     conn.close()
-
-def _ensure_column(c: sqlite3.Cursor, table: str, col: str, ddl: str) -> None:
-    try:
-        c.execute(f"SELECT {col} FROM {table} LIMIT 1")
-    except sqlite3.OperationalError:
-        c.execute(ddl)
 
 # ==============================
 # Auth helpers
@@ -173,7 +185,8 @@ def update_password_by_phone(phone: str, new_password: str) -> bool:
 # Inventory updates and monthly reset
 # ==============================
 
-def update_item(item_id: int, name: str, expiration: str, food_type: str, amount: float, unit: str, price_per_unit: Optional[float] = None) -> None:
+def update_item(item_id: int, name: str, expiration: str, food_type: str,
+                amount: float, unit: str, price_per_unit: Optional[float] = None) -> None:
     conn = get_connection()
     c = conn.cursor()
     if price_per_unit is None:
@@ -437,33 +450,16 @@ def get_monthly_summary(user_id: int, month_key: Optional[str] = None) -> dict:
         "expired_steps": int(row[1] or 0),
         "money_lost": round(row[2] or 0.0, 2)
     }
+
 # ==============================
-# Shopping list table & helpers
+# Shopping list helpers
 # ==============================
 
 def create_shopping_list_table() -> None:
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS shopping_list (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            item_name TEXT NOT NULL,
-            quantity REAL DEFAULT 1,
-            unit TEXT DEFAULT 'pcs',
-            added_at TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-# Run this so the table exists
-create_shopping_list_table()
+    # Kept for backward compatibility. Tables are already created in create_tables().
+    pass
 
 def add_to_shopping_list(user_id: int, item_name: str, quantity: float = 1, unit: str = "pcs") -> None:
-    """Add an item to the shopping list for the given user."""
-    from datetime import datetime
     conn = get_connection()
     c = conn.cursor()
     c.execute("""
@@ -474,7 +470,6 @@ def add_to_shopping_list(user_id: int, item_name: str, quantity: float = 1, unit
     conn.close()
 
 def get_shopping_list(user_id: int):
-    """Retrieve all shopping list items for the given user."""
     conn = get_connection()
     c = conn.cursor()
     c.execute("SELECT id, item_name, quantity, unit, added_at FROM shopping_list WHERE user_id = ?", (user_id,))
@@ -483,7 +478,6 @@ def get_shopping_list(user_id: int):
     return rows
 
 def remove_from_shopping_list(item_id: int) -> None:
-    """Remove a shopping list item by its ID."""
     conn = get_connection()
     c = conn.cursor()
     c.execute("DELETE FROM shopping_list WHERE id = ?", (item_id,))
@@ -491,13 +485,11 @@ def remove_from_shopping_list(item_id: int) -> None:
     conn.close()
 
 def clear_shopping_list(user_id: int) -> None:
-    """Clear the entire shopping list for a given user."""
     conn = get_connection()
     c = conn.cursor()
     c.execute("DELETE FROM shopping_list WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
-
 
 # Ensure tables exist and migrations run at import time
 create_tables()
