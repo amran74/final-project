@@ -1,12 +1,7 @@
 # Inventory.py — clean, focused inventory
 import streamlit as st
 from datetime import datetime, date
-from db import (
-    get_connection,
-    update_item as db_update_item,
-    use_item, use_one_step,
-    expire_item, expire_all,
-)
+import db
 
 def add_item(user_id, name, expiration, food_type, amount, unit, stable=False, price_per_unit=0.0):
     conn = get_connection(); c = conn.cursor()
