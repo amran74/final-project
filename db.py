@@ -413,4 +413,6 @@ def get_monthly_summary(user_id: int, month_key: Optional[str] = None) -> dict:
 # ==============================
 # Ensure schema on import
 # ==============================
-create_tables()
+if __name__ == "__main__":
+    create_tables()
+
