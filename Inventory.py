@@ -2,6 +2,7 @@
 # base units, smart pricing, filters, export, and KPI-safe logging to usage_log
 # Stable@0 items show "Not stocked" (no expiry), are excluded from "expired soon",
 # and are sorted to the end via FAR_FUTURE.
+# NEW: Non-stable items that hit 0 are auto-deleted.
 
 import streamlit as st
 from datetime import datetime, date, timedelta
@@ -76,6 +77,16 @@ def is_stable_zero(stable: bool, base_amount: float) -> bool:
         return bool(stable) and float(base_amount or 0.0) <= 0.0
     except Exception:
         return False
+
+def _auto_delete_if_zero(conn, item_id: int, new_base_amount: float, stable_flag: int) -> bool:
+    """
+    Deletes the inventory row if new_base_amount <= 0 AND stable_flag == 0.
+    Returns True if a deletion happened.
+    """
+    if float(new_base_amount or 0.0) <= 0.0 and int(stable_flag or 0) == 0:
+        conn.execute("DELETE FROM inventory WHERE id=?", (item_id,))
+        return True
+    return False
 
 # --- pricing fallbacks (for legacy price_per_unit) ---
 def _ppu_to_price_per_base(ppu: float, unit: str, base_unit: str) -> float:
@@ -250,30 +261,36 @@ def update_item(item_id: int, name: str, expiration: str, food_type: str,
                 stable_flag: Optional[bool] = None):
     """
     stable_flag is optional; when provided we will also apply the stable@0 rule to expiry.
+    Also auto-deletes if new base amount is 0 and item is NOT stable.
     """
     base_amount, base_unit = to_base(ui_amount, ui_unit)
     price_per_base = compute_price_per_base(total_cost, base_amount)
 
+    conn = get_connection(); c = conn.cursor()
+
     if stable_flag is None:
-        # fetch current stable flag if not passed
-        conn = get_connection(); c = conn.cursor()
         c.execute("SELECT COALESCE(stable,0) FROM inventory WHERE id=?", (item_id,))
-        row = c.fetchone(); conn.close()
+        row = c.fetchone()
         current_stable = bool((row[0] if row else 0))
     else:
         current_stable = bool(stable_flag)
 
     exp_to_store = (FAR_FUTURE if is_stable_zero(current_stable, base_amount) else parse_iso(expiration)).strftime("%Y-%m-%d")
 
-    conn = get_connection()
-    safely_execute(conn, """
+    c.execute("""
         UPDATE inventory
         SET name=?, expiration=?, type=?, amount=?, unit=?, total_cost=?, price_per_base=?,
             base_amount=?, base_unit=?, kind=?, thaw_shelf_life_days=?, recipe_note=?
         WHERE id=?
     """, (name, exp_to_store, food_type, ui_amount, ui_unit, total_cost, price_per_base,
           base_amount, base_unit, kind, thaw_shelf_life_days, recipe_note, item_id))
-    conn.close()
+
+    # auto-delete if non-stable and zero
+    deleted = _auto_delete_if_zero(conn, item_id, base_amount, 0 if current_stable is False else 1)
+    conn.commit(); conn.close()
+    if deleted:
+        # nothing else to do; UI rerun will drop the card
+        return
 
 # -------------------------
 # Actions (now KPI-safe: also write usage_log)
@@ -283,18 +300,19 @@ def use_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, str]:
     """
     Use a quantity in the unit shown to the user (we pass base_unit from the UI).
     Updates inventory and writes an entry to usage_log so home KPIs update.
+    Auto-deletes if item becomes zero and is not stable.
     """
     base_qty, _ = to_base(qty_ui, ui_unit)
     if base_qty <= 0:
         return False, "Quantity must be positive"
 
     conn = get_connection(); c = conn.cursor()
-    c.execute("SELECT base_amount, storage_state, user_id, unit FROM inventory WHERE id=?", (item_id,))
+    c.execute("SELECT base_amount, storage_state, user_id, unit, COALESCE(stable,0) FROM inventory WHERE id=?", (item_id,))
     row = c.fetchone()
     if not row:
         conn.close(); return False, "Item not found"
 
-    base_amount, storage_state, user_id, unit_row = row
+    base_amount, storage_state, user_id, unit_row, stable_flag = row
     if storage_state == "frozen":
         conn.close(); return False, "Cannot use while frozen. Thaw first."
 
@@ -319,12 +337,17 @@ def use_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, str]:
       VALUES (?, ?, 'used', ?, ?, ?, 0.0, ?, ?)
     """, (user_id, item_id, float(qty_ui), (unit_row or ui_unit), int(step_inc), ts, month_key))
 
+    # auto-delete if depleted & not stable
+    deleted = _auto_delete_if_zero(conn, item_id, new_amount, stable_flag)
     conn.commit(); conn.close()
+    if deleted:
+        return True, f"Used {qty_ui} {ui_unit}. Item removed (depleted)."
     return True, f"Used {qty_ui} {ui_unit}"
 
 def expire_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, str]:
     """
     Expire a quantity in the displayed unit. Updates money_lost, expired_count, and usage_log.
+    Auto-deletes if item becomes zero and is not stable.
     """
     base_qty, _ = to_base(qty_ui, ui_unit)
     if base_qty <= 0:
@@ -332,14 +355,14 @@ def expire_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, st
 
     conn = get_connection(); c = conn.cursor()
     c.execute("""
-      SELECT user_id, base_amount, price_per_base, unit, price_per_unit, base_unit
+      SELECT user_id, base_amount, price_per_base, unit, price_per_unit, base_unit, COALESCE(stable,0)
       FROM inventory WHERE id=?
     """, (item_id,))
     row = c.fetchone()
     if not row:
         conn.close(); return False, "Item not found"
 
-    user_id, base_amount, price_per_base, unit_row, ppu_legacy, base_unit = row
+    user_id, base_amount, price_per_base, unit_row, ppu_legacy, base_unit, stable_flag = row
     base_amount = float(base_amount or 0.0)
     if base_amount <= 0:
         conn.close(); return False, "Nothing to expire"
@@ -368,12 +391,17 @@ def expire_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, st
       VALUES (?, ?, 'expired', ?, ?, ?, ?, ?, ?)
     """, (user_id, item_id, float(expired_ui), (unit_row or ui_unit), int(step_inc), float(lost_value), ts, month_key))
 
+    # auto-delete if depleted & not stable
+    deleted = _auto_delete_if_zero(conn, item_id, new_amount, stable_flag)
     conn.commit(); conn.close()
-    return True, f"Expired {expired_ui:.2f} {ui_unit}. Lost ₪{lost_value:.2f}"
+    msg = f"Expired {expired_ui:.2f} {ui_unit}. Lost ₪{lost_value:.2f}"
+    if deleted:
+        msg += " — Item removed (depleted)."
+    return True, msg
 
 def expire_all(item_id: int) -> Tuple[bool, str]:
     """
-    Expire the entire remaining stock. Updates inventory and usage_log.
+    Expire the entire remaining stock. Updates usage_log, then deletes if not stable.
     """
     conn = get_connection(); c = conn.cursor()
     c.execute("""
@@ -389,32 +417,34 @@ def expire_all(item_id: int) -> Tuple[bool, str]:
     if base_amount <= 0:
         conn.close(); return False, f"Nothing to expire for {name}"
 
-    # If this were a stable@0 we shouldn't be here, but guard anyway
-    if is_stable_zero(stable_flag, base_amount):
-        conn.close(); return False, f"{name} is marked stable with no stock."
-
     price_pb = _effective_price_per_base(price_per_base, ppu_legacy, unit_row, base_unit)
     loss = round(base_amount * float(price_pb or 0.0), 2)
-
     step_inc = _compute_step_count(base_amount, base_unit or "pcs")
 
-    c.execute("""
-        UPDATE inventory
-        SET base_amount=0,
-            money_lost=COALESCE(money_lost,0)+?,
-            expired_count=COALESCE(expired_count,0)+?,
-            last_used_month=strftime('%Y-%m','now')
-        WHERE id=?
-    """, (loss, int(step_inc), item_id))
-
+    # Log the expiration event first
     ts, month_key = _today_keys()
     c.execute("""
       INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
       VALUES (?, ?, 'expired', ?, ?, ?, ?, ?, ?)
     """, (user_id, item_id, base_amount, (base_unit or "pcs"), int(step_inc), float(loss), ts, month_key))
 
+    if int(stable_flag or 0) == 0:
+        # Non-stable: delete the item entirely
+        c.execute("DELETE FROM inventory WHERE id=?", (item_id,))
+    else:
+        # Stable: keep record at zero and update counters
+        c.execute("""
+            UPDATE inventory
+            SET base_amount=0,
+                money_lost=COALESCE(money_lost,0)+?,
+                expired_count=COALESCE(expired_count,0)+?,
+                last_used_month=strftime('%Y-%m','now')
+            WHERE id=?
+        """, (loss, int(step_inc), item_id))
+
     conn.commit(); conn.close()
-    return True, f"Expired all of {name}. Lost ₪{loss:.2f}"
+    tail = " (removed)" if int(stable_flag or 0) == 0 else ""
+    return True, f"Expired all of {name}. Lost ₪{loss:.2f}{tail}"
 
 def freeze_item(item_id: int) -> Tuple[bool, str]:
     conn = get_connection(); c = conn.cursor()
@@ -492,7 +522,7 @@ def recipe_editor(prepared_item_id: int, user_id: int):
     selected = col1.selectbox("Ingredient", options=ing_rows, format_func=_fmt, key=f"ri_sel_{prepared_item_id}")
     qty = col2.number_input("Qty base", min_value=0.0, step=1.0, value=0.0, key=f"ri_qty_{prepared_item_id}")
     if col3.button("Add or update", key=f"ri_add_{prepared_item_id}"):
-        conn.execute("""
+        c.execute("""
           INSERT INTO recipe_components(recipe_id, ingredient_item_id, quantity_base)
           VALUES (?,?,?)
           ON CONFLICT(recipe_id, ingredient_item_id) DO UPDATE SET quantity_base=excluded.quantity_base
@@ -520,7 +550,7 @@ def recipe_editor(prepared_item_id: int, user_id: int):
             d2.write(f"{q:.2f} {bu}")
             d3.write(f"₪{(ppb or 0.0):.2f}/base")
             if d4.button("Remove", key=f"ri_del_{cid}"):
-                conn.execute("DELETE FROM recipe_components WHERE id=?", (cid,))
+                c.execute("DELETE FROM recipe_components WHERE id=?", (cid,))
                 conn.commit()
                 st.warning("Removed")
                 st.experimental_rerun()
@@ -530,11 +560,11 @@ def recipe_editor(prepared_item_id: int, user_id: int):
         colu1, colu2 = st.columns([1, 2])
         new_yield = colu1.number_input("Expected yield base", min_value=0.0, step=1.0, value=0.0, key=f"ri_yield_{prepared_item_id}")
         if colu2.button("Update item cost from recipe", key=f"ri_push_{prepared_item_id}"):
-            conn.execute("SELECT base_amount FROM inventory WHERE id=?", (prepared_item_id,))
-            cur_base = float(conn.fetchone()[0] or 0.0)
+            c.execute("SELECT base_amount FROM inventory WHERE id=?", (prepared_item_id,))
+            cur_base = float(c.fetchone()[0] or 0.0)
             yield_base = float(new_yield or cur_base)
             price_per_base = (total_cost / yield_base) if yield_base > 0 else 0.0
-            conn.execute("UPDATE inventory SET total_cost=?, price_per_base=? WHERE id=?", (total_cost, price_per_base, prepared_item_id))
+            c.execute("UPDATE inventory SET total_cost=?, price_per_base=? WHERE id=?", (total_cost, price_per_base, prepared_item_id))
             conn.commit()
             st.success(f"Item updated. Price per base now ₪{price_per_base:.2f}")
             st.experimental_rerun()
@@ -637,7 +667,7 @@ def inventory():
         sort_by = l4.selectbox("Sort by", ["expiration", "name", "price per base"])
         direction = l5.selectbox("Order", ["asc", "desc"])
 
-    st.caption("Ingredient and prepared items share the same list. Prices are normalized per base unit. Frozen items pause shelf life. Stable items at 0 show as ‘Not stocked’ and don’t expire.")
+    st.caption("Ingredient and prepared items share the same list. Prices are normalized per base unit. Frozen items pause shelf life. Stable items at 0 show as ‘Not stocked’ and don’t expire. Non-stable items at 0 are removed automatically.")
 
     # add form
     with st.form("add_item_form", clear_on_submit=True):
@@ -771,7 +801,7 @@ def inventory():
                 </div>
             """, unsafe_allow_html=True)
 
-            # Actions (kept here; Home page will be informational only)
+            # Actions (Inventory keeps actions; Home will be informational only)
             a1, a2, a3, a4, a5 = st.columns([1.2, 1.4, 1.2, 1.2, 1.2])
 
             # Smart step: kg/g => 100 g steps; l/ml => 100 ml steps; pcs => 1
@@ -849,7 +879,7 @@ def inventory():
 
                 if st.button("Save", key=f"save_{item_id}"):
                     try:
-                        # We need stable flag to apply the stable@0 rule on expiry
+                        # We need stable flag to apply the stable@0 rule on expiry and auto-delete if needed
                         update_item(
                             item_id=item_id,
                             name=new_name.strip(),
