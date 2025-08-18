@@ -698,7 +698,10 @@ def inventory():
         ) = r
 
         status_text, color = status_badge(eff_exp, storage_state)
-        hint_val, hint_lbl = format_price_hint(unit_ui if unit_ui in UNITS else base_unit, float(price_per_base or 0.0))
+
+        # Use effective price (handles legacy price_per_unit too)
+        price_pb_display = _effective_price_per_base(price_per_base, ppu_legacy, unit_ui, base_unit)
+        hint_val, hint_lbl = format_price_hint(unit_ui if unit_ui in UNITS else base_unit, float(price_pb_display or 0.0))
 
         host = colA if i % 2 == 0 else colB
         with host:
