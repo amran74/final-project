@@ -1,4 +1,4 @@
-# App.py — Smart Inventory Manager (fixed ordering, safe imports)
+# App.py — Smart Inventory Manager (+ Shopping page, dynamic nav)
 
 from datetime import date
 import streamlit as st
@@ -22,6 +22,12 @@ except ModuleNotFoundError:
     # Fallback if it's inventory.py (lowercase i)
     from inventory import inventory
 
+# Shopping page (capital/lowercase fallback just like Inventory)
+try:
+    from Shopping import shopping
+except ModuleNotFoundError:
+    from shopping import shopping
+
 from AI_Assistant import ai_assistant
 from dashboard import dashboard
 from SmartCoach import coach
@@ -32,60 +38,46 @@ from db import create_tables, reset_monthly_counters, get_connection, get_monthl
 # ================== Styles (nav no-wrap + compact, consistent pills) ==================
 st.markdown("""
 <style>
-/* Layout polish */
 .block-container { padding-top: 1rem; }
 .header { background:#0b0f2a; border:1px solid #13203a; border-radius:14px; padding:12px 16px; margin-bottom:12px; }
 .kpi { background:#0f1428; border:1px solid #1e2a44; border-radius:12px; padding:10px 8px; text-align:center; }
 .kpi .val { font-weight:700; font-size:20px; color:#e8f2ff; }
 .kpi .lbl { font-size:12px; color:#9bb3c7; }
 
-/* Tell Streamlit columns that contain nav buttons to stop stretching and wrapping */
+/* Prevent nav wrapping */
 div[data-testid="column"] > div:has(.navbtn) {
   flex: 0 0 auto !important;
   min-width: 0 !important;
   white-space: nowrap !important;
 }
-
-/* The nav pill itself */
 .navbtn { display:inline-block; }
-
-/* Streamlit's button gets hard overrides */
 .navbtn > button,
 div[data-testid="column"] .navbtn > button {
   min-width: 132px !important;
   max-width: 132px !important;
   height: 42px !important;
   padding: 0 12px !important;
-
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
   gap: 6px !important;
-
   border-radius: 10px !important;
   border: 1px solid #1e2a44 !important;
   background: #121629 !important;
   color: #dfe9f3 !important;
   font-size: 14px !important;
   font-weight: 500 !important;
-
   white-space: nowrap !important;
   overflow: hidden !important;
   text-overflow: ellipsis !important;
   line-height: 1 !important;
 }
-
-/* Inner elements inside Streamlit's button sometimes re-wrap; shut that down */
 .navbtn > button * { white-space: nowrap !important; }
-
-/* Active state */
 .navbtn.active > button {
   background: #0d2744 !important;
   border-color: #00bfff !important;
   color: #e8f6ff !important;
 }
-
-/* Hover focus */
 .navbtn > button:hover { border-color:#00bfff !important; }
 .navbtn > button:focus { outline:none !important; box-shadow:none !important; }
 </style>
@@ -95,21 +87,27 @@ div[data-testid="column"] .navbtn > button {
 create_tables()
 reset_monthly_counters()
 
-# ================== Page registry ==================
+# ================== Page registry (insertion order = nav order) ==================
 PAGES = {
     "🏡 Home": calendar_view,
     "📦 Stock": inventory,
+    "🛒 Shopping": shopping,     # ← new page
     "🧠 Coach": coach,
     "🤖 AI": ai_assistant,
     "📊 Stats": dashboard,
 }
 PAGE_KEYS = list(PAGES.keys())
+
+# URL aliases like ?page=shopping
 ALIAS = {
     "home": "🏡 Home",
     "inventory": "📦 Stock",
+    "stock": "📦 Stock",
+    "shopping": "🛒 Shopping",   # ← new alias
     "coach": "🧠 Coach",
     "ai": "🤖 AI",
     "dashboard": "📊 Stats",
+    "stats": "📊 Stats",
 }
 
 # ================== Helpers ==================
@@ -127,7 +125,7 @@ def _kpis(user_id: int):
 
 def _goto(label: str):
     st.session_state["__page"] = label
-    st.toast(label.strip("📦🏡🧠🤖📊 "), icon="➡️")
+    st.toast(label.strip("📦🏡🧠🤖📊🛒 "), icon="➡️")
 
 # ================== Global post-login interceptor ==================
 if st.session_state.get("just_logged_in"):
@@ -194,14 +192,17 @@ with st.container():
 
     with c:
         st.markdown(f"<div style='text-align:right;color:#9bd7ff;font-weight:600;'>👋 {_user_name()}</div>", unsafe_allow_html=True)
-        n1, n2, n3, n4, n5 = st.columns(5)
+
+        # ---- Dynamic nav: 1 button per page key ----
+        nav_cols = st.columns(len(PAGE_KEYS))
         for i, label in enumerate(PAGE_KEYS):
             active = " active" if st.session_state["__page"] == label else ""
-            with [n1, n2, n3, n4, n5][i]:
+            with nav_cols[i]:
                 st.markdown(f"<div class='navbtn{active}'>", unsafe_allow_html=True)
                 if st.button(label, key=f"nav_{i}"):
                     _goto(label)
                 st.markdown("</div>", unsafe_allow_html=True)
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ================== Render current page ==================
@@ -212,7 +213,7 @@ PAGES.get(current, calendar_view)()
 st.markdown(f"""
 <hr style="opacity:0.15">
 <div style="font-size:12px;color:#93a4b4;display:flex;justify-content:space-between;">
-  <div>v1.9 • {date.today().isoformat()} • {current}</div>
+  <div>v2.0 • {date.today().isoformat()} • {current}</div>
   <div>Made with Python and questionable life choices.</div>
 </div>
 """, unsafe_allow_html=True)
