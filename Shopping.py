@@ -11,7 +11,7 @@ import math
 from db import (
     get_connection,
     create_tables,
-    _today_keys,         # we reuse timestamp helper
+    _today_keys,         # (kept if you want timestamps consistent across the app)
 )
 
 # -------------------------
@@ -44,65 +44,75 @@ def iso_today() -> str:
     return date.today().strftime("%Y-%m-%d")
 
 # -------------------------
-# Migrations (shopping + a few inventory helpers)
+# Migrations (shopping + inventory helpers)
 # -------------------------
 
 SHOP_MIGRATIONS = [
     # Stores catalog
-    ("CREATE TABLE IF NOT EXISTS stores ("
-     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-     "  user_id INTEGER NOT NULL,"
-     "  name TEXT NOT NULL,"
-     "  kind TEXT DEFAULT 'local',"           -- local | chain | greengrocer | online
-     "  city TEXT,"
-     "  link_url TEXT,"
-     "  notes TEXT,"
-     "  UNIQUE(user_id, name)"
-     ")",),
+    ("""
+     CREATE TABLE IF NOT EXISTS stores (
+       id       INTEGER PRIMARY KEY AUTOINCREMENT,
+       user_id  INTEGER NOT NULL,
+       name     TEXT NOT NULL,
+       kind     TEXT DEFAULT 'local',
+       city     TEXT,
+       link_url TEXT,
+       notes    TEXT,
+       UNIQUE(user_id, name)
+     )
+    """,),
     # Store item prices (price book)
-    ("CREATE TABLE IF NOT EXISTS store_prices ("
-     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-     "  user_id INTEGER NOT NULL,"
-     "  store_id INTEGER NOT NULL,"
-     "  item_id INTEGER NOT NULL,"            -- references inventory.id
-     "  pack_qty REAL NOT NULL,"              -- quantity in UI unit below
-     "  pack_unit TEXT NOT NULL,"
-     "  pack_price REAL NOT NULL,"            -- ₪ per pack
-     "  price_per_base REAL NOT NULL,"        -- computed ₪ / base-unit
-     "  last_seen TEXT NOT NULL,"
-     "  UNIQUE(user_id, store_id, item_id)"
-     ")",),
+    ("""
+     CREATE TABLE IF NOT EXISTS store_prices (
+       id             INTEGER PRIMARY KEY AUTOINCREMENT,
+       user_id        INTEGER NOT NULL,
+       store_id       INTEGER NOT NULL,
+       item_id        INTEGER NOT NULL,
+       pack_qty       REAL NOT NULL,
+       pack_unit      TEXT NOT NULL,
+       pack_price     REAL NOT NULL,
+       price_per_base REAL NOT NULL,
+       last_seen      TEXT NOT NULL,
+       UNIQUE(user_id, store_id, item_id)
+     )
+    """,),
     # Shopping lists (templates and sessions)
-    ("CREATE TABLE IF NOT EXISTS shopping_lists ("
-     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-     "  user_id INTEGER NOT NULL,"
-     "  title TEXT NOT NULL,"
-     "  status TEXT DEFAULT 'draft',"          -- draft | purchased | template
-     "  budget REAL,"
-     "  created_at TEXT NOT NULL,"
-     "  notes TEXT"
-     ")",),
-    ("CREATE TABLE IF NOT EXISTS shopping_list_items ("
-     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-     "  list_id INTEGER NOT NULL,"
-     "  item_id INTEGER NOT NULL,"             -- inventory.id
-     "  desired_qty_base REAL NOT NULL,"
-     "  chosen_store_id INTEGER,"
-     "  est_unit_price_base REAL,"             -- ₪ per base (from price book)
-     "  est_total REAL,"                       -- qty_base * est_unit_price_base
-     "  expiration TEXT"                       -- optional per-line expiry for perishables
-     ")",),
-    # Purchases log (separate from usage_log)
-    ("CREATE TABLE IF NOT EXISTS purchases_log ("
-     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-     "  user_id INTEGER NOT NULL,"
-     "  item_id INTEGER NOT NULL,"
-     "  store_id INTEGER,"
-     "  qty_base REAL NOT NULL,"
-     "  unit_price_base REAL NOT NULL,"
-     "  total_paid REAL NOT NULL,"
-     "  ts TEXT NOT NULL"
-     ")",),
+    ("""
+     CREATE TABLE IF NOT EXISTS shopping_lists (
+       id         INTEGER PRIMARY KEY AUTOINCREMENT,
+       user_id    INTEGER NOT NULL,
+       title      TEXT NOT NULL,
+       status     TEXT DEFAULT 'draft',
+       budget     REAL,
+       created_at TEXT NOT NULL,
+       notes      TEXT
+     )
+    """,),
+    ("""
+     CREATE TABLE IF NOT EXISTS shopping_list_items (
+       id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+       list_id              INTEGER NOT NULL,
+       item_id              INTEGER NOT NULL,
+       desired_qty_base     REAL NOT NULL,
+       chosen_store_id      INTEGER,
+       est_unit_price_base  REAL,
+       est_total            REAL,
+       expiration           TEXT
+     )
+    """,),
+    # Purchases log
+    ("""
+     CREATE TABLE IF NOT EXISTS purchases_log (
+       id              INTEGER PRIMARY KEY AUTOINCREMENT,
+       user_id         INTEGER NOT NULL,
+       item_id         INTEGER NOT NULL,
+       store_id        INTEGER,
+       qty_base        REAL NOT NULL,
+       unit_price_base REAL NOT NULL,
+       total_paid      REAL NOT NULL,
+       ts              TEXT NOT NULL
+     )
+    """,),
     # Inventory helpers for shopping rules
     ("ALTER TABLE inventory ADD COLUMN always_buy INTEGER DEFAULT 0",),
     ("ALTER TABLE inventory ADD COLUMN par_level_base REAL DEFAULT 0.0",),
@@ -111,9 +121,11 @@ SHOP_MIGRATIONS = [
 def run_shopping_migrations():
     conn = get_connection()
     c = conn.cursor()
-    # get current columns to avoid duplicate ALTERs
+
+    # existing inventory columns to avoid duplicate ALTERs
     c.execute("PRAGMA table_info(inventory)")
     inv_cols = {row[1] for row in c.fetchall()}
+
     for mig in SHOP_MIGRATIONS:
         stmt = mig[0]
         if stmt.startswith("ALTER TABLE inventory"):
@@ -124,7 +136,9 @@ def run_shopping_migrations():
             c.execute(stmt)
             conn.commit()
         except Exception:
+            # ignore if already applied / benign
             pass
+
     conn.close()
 
 # -------------------------
@@ -161,7 +175,8 @@ def add_or_update_store(user_id: int, name: str, kind: str, city: str, link_url:
       VALUES (?,?,?,?,?,?)
       ON CONFLICT(user_id, name) DO UPDATE SET
         kind=excluded.kind, city=excluded.city, link_url=excluded.link_url, notes=excluded.notes
-    """, (user_id, name.strip(), kind, city.strip() if city else None, link_url.strip() if link_url else None, notes.strip() if notes else None))
+    """, (user_id, name.strip(), kind, city.strip() if city else None,
+          link_url.strip() if link_url else None, notes.strip() if notes else None))
     conn.commit(); conn.close()
 
 def delete_store(store_id: int):
@@ -179,9 +194,13 @@ def upsert_store_price(user_id: int, store_id: int, item_id: int,
       INSERT INTO store_prices(user_id, store_id, item_id, pack_qty, pack_unit, pack_price, price_per_base, last_seen)
       VALUES (?,?,?,?,?,?,?,?)
       ON CONFLICT(user_id, store_id, item_id) DO UPDATE SET
-        pack_qty=excluded.pack_qty, pack_unit=excluded.pack_unit, pack_price=excluded.pack_price,
-        price_per_base=excluded.price_per_base, last_seen=excluded.last_seen
-    """, (user_id, store_id, item_id, float(pack_qty), pack_unit, float(pack_price), float(price_per_base), iso_today()))
+        pack_qty=excluded.pack_qty,
+        pack_unit=excluded.pack_unit,
+        pack_price=excluded.pack_price,
+        price_per_base=excluded.price_per_base,
+        last_seen=excluded.last_seen
+    """, (user_id, store_id, item_id, float(pack_qty), pack_unit, float(pack_price),
+          float(price_per_base), iso_today()))
     conn.commit(); conn.close()
 
 def get_store_prices_for_store(user_id: int, store_id: int):
@@ -198,11 +217,12 @@ def get_store_prices_for_store(user_id: int, store_id: int):
     return rows
 
 def best_price_for_item(user_id: int, item_id: int) -> Optional[tuple]:
-    """Return (store_id, store_name, price_per_base) with the lowest price."""
+    """Return (store_id, store_name, price_per_base) with the lowest price for that item."""
     conn = get_connection(); c = conn.cursor()
     c.execute("""
       SELECT sp.store_id, s.name, sp.price_per_base
-      FROM store_prices sp JOIN stores s ON s.id=sp.store_id
+      FROM store_prices sp
+      JOIN stores s ON s.id=sp.store_id
       WHERE sp.user_id=? AND sp.item_id=?
       ORDER BY sp.price_per_base ASC
       LIMIT 1
@@ -213,8 +233,10 @@ def best_price_for_item(user_id: int, item_id: int) -> Optional[tuple]:
 
 def set_item_rules(item_id: int, always_buy: bool, par_level_base: float):
     conn = get_connection()
-    conn.execute("UPDATE inventory SET always_buy=?, par_level_base=? WHERE id=?",
-                 (1 if always_buy else 0, float(par_level_base or 0.0), item_id))
+    conn.execute(
+        "UPDATE inventory SET always_buy=?, par_level_base=? WHERE id=?",
+        (1 if always_buy else 0, float(par_level_base or 0.0), item_id)
+    )
     conn.commit(); conn.close()
 
 # usage rate from usage_log (steps -> base units)
@@ -228,6 +250,7 @@ def recent_daily_usage_base(user_id: int, item_id: int, base_unit: str, horizon_
     """, (user_id, item_id, since))
     steps = float(c.fetchone()[0] or 0.0)
     conn.close()
+    # steps are 100g/100ml/1pc; multiply by that step to get base units/day
     return steps * step_size_for(base_unit) / max(horizon_days, 1)
 
 # -------------------------
@@ -263,7 +286,6 @@ def suggest_shopping_lines(user_id: int,
         elif coverage_days < coverage_threshold_days:
             include = True
             target_qty = max(target_days * avg_daily - on_hand, 0.0)
-            # round up to a meaningful step
             step = step_size_for(base_unit)
             desired = math.ceil(target_qty / step) * step
 
@@ -325,12 +347,12 @@ def checkout_cart(user_id: int):
         total_paid = unit_price_base * qty_base
         exp = row.get("expiration")  # may be None
 
-        # Update inventory: add to base_amount; total_cost & price_per_base as moving avg
+        # Update inventory: add to base_amount; update moving avg price
         c.execute("SELECT base_amount, total_cost, price_per_base, stable, expiration FROM inventory WHERE id=?", (item_id,))
         cur = c.fetchone()
         if not cur:
-            # skip if item disappeared
-            continue
+            continue  # item missing
+
         base_amount, total_cost, old_ppb, stable_flag, cur_exp = cur
         base_amount = float(base_amount or 0.0)
         total_cost = float(total_cost or 0.0)
@@ -382,7 +404,6 @@ def shopping():
 
     create_tables()
     run_shopping_migrations()
-
     _ensure_cart()
 
     # --- STORES ------------------------------------------------------------
@@ -396,8 +417,7 @@ def shopping():
         if st.button("Add / Update store"):
             if new_name.strip():
                 add_or_update_store(user_id, new_name, new_kind, new_city, new_link, new_notes)
-                st.success("Store saved")
-                st.rerun()
+                st.success("Store saved"); st.rerun()
             else:
                 st.error("Store name is required")
 
@@ -427,8 +447,10 @@ def shopping():
             st.info("Add at least one store and one inventory item to record prices.")
         else:
             c1, c2 = st.columns([1.2, 2])
-            store_sel = c1.selectbox("Store", options=stores, format_func=lambda r: f"{r[1]} ({r[2]})", key="pb_store")
-            item_sel = c2.selectbox("Item", options=inv, format_func=lambda r: f"{r[1]} [{r[4]}]", key="pb_item")
+            store_sel = c1.selectbox("Store", options=stores,
+                                     format_func=lambda r: f"{r[1]} ({r[2]})", key="pb_store")
+            item_sel = c2.selectbox("Item", options=inv,
+                                    format_func=lambda r: f"{r[1]} [{r[4]}]", key="pb_item")
             p1, p2, p3 = st.columns([1, 1, 1])
             pack_qty = p1.number_input("Pack qty", min_value=0.0, step=0.1, value=1.0, key="pb_qty")
             pack_unit = p2.selectbox("Unit", UNITS, key="pb_unit")
@@ -456,10 +478,10 @@ def shopping():
                 cols = st.columns([2, 1, 1.2, 1.2, 1])
                 cols[0].write(f"**{nm}**  _[{bu}]_  — on hand: {onhand:.1f} {bu}")
                 ab = cols[1].checkbox("Always buy", value=bool(always_buy), key=f"ab_{iid}")
-                new_par = cols[2].number_input("Par (base)", min_value=0.0, step=step_size_for(bu), value=float(par or 0.0), key=f"par_{iid}")
+                new_par = cols[2].number_input("Par (base)", min_value=0.0, step=step_size_for(bu),
+                                               value=float(par or 0.0), key=f"par_{iid}")
                 if cols[3].button("Save", key=f"sv_{iid}"):
                     set_item_rules(iid, ab, new_par); st.success("Rules saved")
-                cols[4].write("")
 
     # --- AI LIST BUILDER ---------------------------------------------------
     st.subheader("✨ AI shopping suggestions")
@@ -469,18 +491,20 @@ def shopping():
     if col_c.button("Build suggestions"):
         st.session_state.suggestions = suggest_shopping_lines(user_id, target_days, threshold)
     if "suggestions" in st.session_state and st.session_state.suggestions:
+        stores_cached = get_stores(user_id)
         for idx, row in enumerate(st.session_state.suggestions):
             c1, c2, c3, c4, c5, c6 = st.columns([2, 1, 1.2, 1.6, 1, 1])
             c1.write(f"**{row['name']}** [{row['base_unit']}]")
             qty = c2.number_input("Qty (base)", min_value=0.0, step=step_size_for(row["base_unit"]),
                                   value=float(row["qty_base"]), key=f"sugg_qty_{idx}")
             store_id = row["store_id"]
-            stores = get_stores(user_id)
-            store_options = [(None, "— No store —", "", "", "")] + stores
-            chosen = c3.selectbox("Store", options=store_options,
-                                  index=0 if store_id is None else 1 + next((i for i,s in enumerate(stores) if s[0]==store_id), 0),
-                                  format_func=lambda r: r[1] if isinstance(r, tuple) else "—", key=f"sugg_store_{idx}")
-            unit_price = c4.number_input("₪/base", min_value=0.0, step=0.1, value=float(row["unit_price_base"] or 0.0), key=f"sugg_ppb_{idx}")
+            store_options = [(None, "— No store —", "", "", "")] + stores_cached
+            def _fmt_store(r): return r[1] if isinstance(r, tuple) else "—"
+            chosen_idx = 0 if store_id is None else 1 + next((i for i,s in enumerate(stores_cached) if s[0]==store_id), 0)
+            chosen = c3.selectbox("Store", options=store_options, index=chosen_idx,
+                                  format_func=_fmt_store, key=f"sugg_store_{idx}")
+            unit_price = c4.number_input("₪/base", min_value=0.0, step=0.1,
+                                         value=float(row["unit_price_base"] or 0.0), key=f"sugg_ppb_{idx}")
             exp = c5.date_input("Expiry (opt.)", value=date.today(), key=f"sugg_exp_{idx}")
             if c6.button("Add to cart", key=f"sugg_add_{idx}"):
                 add_to_cart({
@@ -504,7 +528,8 @@ def shopping():
             step = step_size_for(irow[4])
             qa, qb, qc, qd = st.columns([1, 1, 1.2, 1.2])
             qty = qa.number_input("Qty (base)", min_value=0.0, step=step, value=step)
-            s = qb.selectbox("Store", options=[(None, "—", "", "", "")]+stores, format_func=lambda r: r[1] if isinstance(r, tuple) else "—")
+            s = qb.selectbox("Store", options=[(None, "—", "", "", "")]+stores,
+                             format_func=lambda r: r[1] if isinstance(r, tuple) else "—")
             ppb = qc.number_input("₪/base", min_value=0.0, step=0.1, value=float(irow[6] or 0.0))
             exp = qd.date_input("Expiry (opt.)", value=date.today())
             if st.button("Add"):
@@ -523,8 +548,8 @@ def shopping():
     if not st.session_state.cart:
         st.info("Cart is empty.")
     else:
-        # group by store for totals
         totals_by_store: Dict[Optional[int], float] = {}
+        stores_cached = get_stores(user_id)
         for idx, row in enumerate(st.session_state.cart):
             unit_total = float(row.get("unit_price_base") or 0.0) * float(row["qty_base"])
             store_key = row.get("store_id")
@@ -536,22 +561,23 @@ def shopping():
                                               value=float(row["qty_base"]), key=f"cart_qty_{idx}")
             row["unit_price_base"] = c3.number_input("₪/base", min_value=0.0, step=0.1,
                                                      value=float(row.get("unit_price_base") or 0.0), key=f"cart_ppb_{idx}")
-            stores = get_stores(user_id)
-            store_opts = [(None, "—", "", "", "")] + stores
-            cur_index = 0 if row.get("store_id") is None else 1 + next((i for i,s in enumerate(stores) if s[0]==row["store_id"]), 0)
-            chosen = c4.selectbox("Store", options=store_opts, index=cur_index, format_func=lambda r: r[1] if isinstance(r, tuple) else "—", key=f"cart_store_{idx}")
+            store_opts = [(None, "—", "", "", "")] + stores_cached
+            cur_index = 0 if row.get("store_id") is None else 1 + next((i for i,s in enumerate(stores_cached) if s[0]==row["store_id"]), 0)
+            chosen = c4.selectbox("Store", options=store_opts, index=cur_index,
+                                  format_func=lambda r: r[1] if isinstance(r, tuple) else "—", key=f"cart_store_{idx}")
             row["store_id"] = None if chosen[0] is None else chosen[0]
             row["store_name"] = None if chosen[0] is None else chosen[1]
             exp_val = row.get("expiration")
-            row["expiration"] = c5.date_input("Expiry (opt.)", value=date.fromisoformat(exp_val) if exp_val else date.today(), key=f"cart_exp_{idx}").strftime("%Y-%m-%d")
+            row["expiration"] = c5.date_input("Expiry (opt.)",
+                                              value=date.fromisoformat(exp_val) if exp_val else date.today(),
+                                              key=f"cart_exp_{idx}").strftime("%Y-%m-%d")
             c6.write(f"Line: ₪{row['unit_price_base'] * row['qty_base']:.2f}")
             if c7.button("✕", key=f"rm_{idx}"):
                 remove_from_cart(idx); st.rerun()
 
-        # totals
         st.divider()
         for sid, total in totals_by_store.items():
-            store_name = "No store" if sid is None else next((s[1] for s in get_stores(user_id) if s[0]==sid), "Store")
+            store_name = "No store" if sid is None else next((s[1] for s in stores_cached if s[0]==sid), "Store")
             st.write(f"**{store_name}** — ₪{total:.2f}")
         st.write(f"**Grand total: ₪{sum(totals_by_store.values()):.2f}**")
 
@@ -580,29 +606,32 @@ def shopping():
                     c.execute("""
                       INSERT INTO shopping_list_items(list_id, item_id, desired_qty_base, chosen_store_id, est_unit_price_base, est_total, expiration)
                       VALUES (?,?,?,?,?,?,?)
-                    """, (list_id, row["item_id"], row["qty_base"], row.get("store_id"), row.get("unit_price_base"),
-                          (row.get("unit_price_base") or 0.0) * row["qty_base"], row.get("expiration")))
+                    """, (list_id, row["item_id"], row["qty_base"], row.get("store_id"),
+                          row.get("unit_price_base"),
+                          (row.get("unit_price_base") or 0.0) * row["qty_base"],
+                          row.get("expiration")))
                 conn.commit(); conn.close()
                 st.success("Saved as template")
 
         # load templates
         conn = get_connection(); c = conn.cursor()
-        c.execute("SELECT id, title, created_at FROM shopping_lists WHERE user_id=? AND status='template' ORDER BY created_at DESC", (user_id,))
+        c.execute("SELECT id, title, created_at FROM shopping_lists WHERE user_id=? AND status='template' ORDER BY created_at DESC",
+                  (user_id,))
         templates = c.fetchall(); conn.close()
         if templates:
             chosen = st.selectbox("Load template", options=templates, format_func=lambda r: f"{r[1]} ({r[2]})")
             if st.button("Load → cart"):
-                # load into cart (replace)
                 conn = get_connection(); c = conn.cursor()
-                c.execute("""SELECT item_id, desired_qty_base, chosen_store_id, est_unit_price_base, expiration
-                            FROM shopping_list_items WHERE list_id=?""", (chosen[0],))
+                c.execute("""
+                  SELECT item_id, desired_qty_base, chosen_store_id, est_unit_price_base, expiration
+                  FROM shopping_list_items WHERE list_id=?
+                """, (chosen[0],))
                 rows = c.fetchall(); conn.close()
                 clear_cart()
+                inv = get_inventory(user_id)
                 for item_id, qty, store_id, unit_ppb, exp in rows:
-                    # fetch item info
-                    inv = get_inventory(user_id)
                     meta = next((r for r in inv if r[0]==item_id), None)
-                    if not meta:  # item may have been deleted
+                    if not meta:
                         continue
                     add_to_cart({
                         "item_id": item_id,
