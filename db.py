@@ -1,4 +1,4 @@
-# db.py — safe schema, includes reset_monthly_counters, no side effects on import
+# db.py — safe schema, monthly KPIs via usage_log, correct money_lost with fallbacks
 import sqlite3
 from datetime import datetime, date
 from typing import Optional, Tuple
@@ -74,6 +74,30 @@ def create_tables() -> None:
             FOREIGN KEY(user_id) REFERENCES users(id)
         )
     """)
+
+    # Modern extras used by the upgraded Inventory page (additive, safe)
+    _ensure_column(c, "inventory", "kind",
+                   'ALTER TABLE "inventory" ADD COLUMN "kind" TEXT DEFAULT "ingredient"')
+    _ensure_column(c, "inventory", "base_unit",
+                   'ALTER TABLE "inventory" ADD COLUMN "base_unit" TEXT DEFAULT "pcs"')
+    _ensure_column(c, "inventory", "base_amount",
+                   'ALTER TABLE "inventory" ADD COLUMN "base_amount" REAL DEFAULT 0.0')
+    _ensure_column(c, "inventory", "total_cost",
+                   'ALTER TABLE "inventory" ADD COLUMN "total_cost" REAL DEFAULT 0.0')
+    _ensure_column(c, "inventory", "price_per_base",
+                   'ALTER TABLE "inventory" ADD COLUMN "price_per_base" REAL DEFAULT 0.0')
+    _ensure_column(c, "inventory", "storage_state",
+                   'ALTER TABLE "inventory" ADD COLUMN "storage_state" TEXT DEFAULT "fresh"')
+    _ensure_column(c, "inventory", "frozen_at",
+                   'ALTER TABLE "inventory" ADD COLUMN "frozen_at" TEXT')
+    _ensure_column(c, "inventory", "thawed_at",
+                   'ALTER TABLE "inventory" ADD COLUMN "thawed_at" TEXT')
+    _ensure_column(c, "inventory", "frozen_days_accum",
+                   'ALTER TABLE "inventory" ADD COLUMN "frozen_days_accum" INTEGER DEFAULT 0')
+    _ensure_column(c, "inventory", "thaw_shelf_life_days",
+                   'ALTER TABLE "inventory" ADD COLUMN "thaw_shelf_life_days" INTEGER')
+    _ensure_column(c, "inventory", "recipe_note",
+                   'ALTER TABLE "inventory" ADD COLUMN "recipe_note" TEXT')
 
     # --- Usage log (base; legacy compatible) ---
     c.execute("""
@@ -216,6 +240,43 @@ def _today_keys():
     ts = datetime.now()
     return ts.isoformat(timespec="seconds"), ts.strftime("%Y-%m")
 
+# ---- price helpers (so money_lost isn’t stuck at 0) ----
+
+def _effective_price_per_base(c: sqlite3.Cursor, item_id: int) -> Tuple[float, Optional[str]]:
+    """
+    Try to read price_per_base and base_unit if those columns exist.
+    Returns (price_per_base, base_unit or None). If missing, returns (0.0, None).
+    """
+    try:
+        c.execute("SELECT price_per_base, base_unit FROM inventory WHERE id=?", (item_id,))
+        row = c.fetchone()
+        if row:
+            ppb, bu = row
+            return float(ppb or 0.0), (bu or None)
+    except sqlite3.OperationalError:
+        # columns don't exist in this DB; fine
+        pass
+    return 0.0, None
+
+def _compute_loss_shekel(c: sqlite3.Cursor, item_id: int, qty: float, unit: str, ppu: float) -> float:
+    """
+    Compute lost value with smart fallback:
+      1) use price_per_unit * qty when price_per_unit > 0
+      2) else try price_per_base * qty_in_base (g/ml/pcs)
+    """
+    if (ppu or 0.0) > 0:
+        return round((ppu or 0.0) * (qty or 0.0), 2)
+
+    # Fallback to price_per_base if present
+    qty_base, qty_base_unit, _ = _normalize_quantity(qty, unit)
+    ppb, inv_base_unit = _effective_price_per_base(c, item_id)
+
+    if ppb > 0 and inv_base_unit and inv_base_unit.lower().strip() == qty_base_unit:
+        return round(ppb * qty_base, 2)
+
+    # Nothing to go on
+    return 0.0
+
 # ==============================
 # Core operations
 # ==============================
@@ -240,7 +301,7 @@ def use_item(item_id: int, qty: float) -> dict:
         raise ValueError(f"Not enough stock: have {amount} {unit}, asked to use {qty} {unit}.")
 
     step_inc = _compute_step_count(qty, unit)
-    new_amount = amount - qty
+    new_amount = max(0.0, amount - qty)
     new_used = (used_count or 0) + step_inc
 
     c.execute("""
@@ -282,9 +343,9 @@ def expire_item(item_id: int, qty: Optional[float] = None) -> dict:
         raise ValueError(f"Not enough stock to expire: have {amount} {unit}, tried to expire {qty} {unit}.")
 
     step_inc = _compute_step_count(qty, unit)
-    lost_value = round((ppu or 0.0) * qty, 2)
+    lost_value = _compute_loss_shekel(c, item_id, qty, unit, ppu)
 
-    new_amount = amount - qty
+    new_amount = max(0.0, amount - qty)
     new_expired = (expired_count or 0) + step_inc
     new_lost = round((money_lost or 0.0) + lost_value, 2)
 
@@ -353,7 +414,8 @@ def expire_all(item_id: int) -> dict:
         return {"expired_step_added": 0, "lost_nis_total": float(money_lost or 0.0), "remaining": 0.0, "unit": unit}
 
     step_inc = _compute_step_count(amount, unit)
-    lost_value = round((ppu or 0.0) * amount, 2)
+    # compute loss using the same fallback logic
+    lost_value = _compute_loss_shekel(c, item_id, amount, unit, ppu)
 
     new_expired = (expired_count or 0) + step_inc
     new_lost = round((money_lost or 0.0) + lost_value, 2)

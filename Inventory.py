@@ -63,6 +63,28 @@ def safely_execute(conn, sql, params=()):
     c.execute(sql, params)
     conn.commit()
 
+# --- pricing fallbacks (new) ---
+def _ppu_to_price_per_base(ppu: float, unit: str, base_unit: str) -> float:
+    """Convert legacy price_per_unit in 'unit' to price per base unit."""
+    if not ppu or ppu <= 0:
+        return 0.0
+    unit = (unit or "").lower()
+    if base_unit == "g":
+        if unit == "kg":   return ppu / 1000.0  # ₪/kg -> ₪/g
+        if unit == "g":    return ppu           # ₪/g  -> ₪/g
+        if unit == "mg":   return ppu * 1000.0  # ₪/mg -> ₪/g
+        return 0.0
+    if base_unit == "ml":
+        if unit == "l":    return ppu / 1000.0  # ₪/L -> ₪/ml
+        if unit == "ml":   return ppu           # ₪/ml -> ₪/ml
+        return 0.0
+    # pieces
+    return ppu  # ₪/piece
+
+def _effective_price_per_base(price_per_base: float, price_per_unit: float, unit: str, base_unit: str) -> float:
+    """Use price_per_base if set; otherwise derive from legacy price_per_unit."""
+    return float(price_per_base or 0.0) if (price_per_base or 0) > 0 else _ppu_to_price_per_base(float(price_per_unit or 0.0), unit, base_unit)
+
 # -------------------------
 # One-time migrations
 # -------------------------
@@ -207,15 +229,21 @@ def use_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, str]:
     if base_qty <= 0:
         return False, "Quantity must be positive"
     conn = get_connection(); c = conn.cursor()
-    c.execute("SELECT base_amount, storage_state FROM inventory WHERE id=?", (item_id,))
+    c.execute("SELECT base_amount, storage_state, COALESCE(used_count,0) FROM inventory WHERE id=?", (item_id,))
     row = c.fetchone()
     if not row:
         conn.close(); return False, "Item not found"
-    base_amount, storage_state = row
+    base_amount, storage_state, used_count = row
     if storage_state == "frozen":
         conn.close(); return False, "Cannot use while frozen. Thaw first."
     new_amount = max(0.0, float(base_amount) - base_qty)
-    c.execute("UPDATE inventory SET base_amount=? WHERE id=?", (new_amount, item_id))
+    c.execute("""
+        UPDATE inventory
+        SET base_amount=?,
+            used_count=?,
+            last_used_month=strftime('%Y-%m','now')
+        WHERE id=?
+    """, (new_amount, int(used_count) + 1, item_id))
     conn.commit(); conn.close()
     return True, f"Used {qty_ui} {ui_unit}"
 
@@ -224,17 +252,25 @@ def expire_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, st
     if base_qty <= 0:
         return False, "Quantity must be positive"
     conn = get_connection(); c = conn.cursor()
-    c.execute("SELECT base_amount, price_per_base FROM inventory WHERE id=?", (item_id,))
+    c.execute("""
+      SELECT base_amount, price_per_base, unit, price_per_unit, base_unit
+      FROM inventory
+      WHERE id=?
+    """, (item_id,))
     row = c.fetchone()
     if not row:
         conn.close(); return False, "Item not found"
-    base_amount, price_per_base = row
+    base_amount, price_per_base, unit, ppu_legacy, base_unit = row
+    price_pb = _effective_price_per_base(price_per_base, ppu_legacy, unit, base_unit)
     expired_qty = min(base_qty, float(base_amount))
     new_amount = max(0.0, float(base_amount) - expired_qty)
-    money_lost = expired_qty * float(price_per_base or 0.0)
+    money_lost = expired_qty * float(price_pb or 0.0)
     c.execute("""
         UPDATE inventory
-        SET base_amount=?, money_lost=COALESCE(money_lost,0)+?, expired_count=COALESCE(expired_count,0)+1
+        SET base_amount=?,
+            money_lost=COALESCE(money_lost,0)+?,
+            expired_count=COALESCE(expired_count,0)+1,
+            last_used_month=strftime('%Y-%m','now')
         WHERE id=?
     """, (new_amount, money_lost, item_id))
     conn.commit(); conn.close()
@@ -242,15 +278,22 @@ def expire_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, st
 
 def expire_all(item_id: int) -> Tuple[bool, str]:
     conn = get_connection(); c = conn.cursor()
-    c.execute("SELECT base_amount, price_per_base, name FROM inventory WHERE id=?", (item_id,))
+    c.execute("""
+      SELECT base_amount, price_per_base, name, unit, price_per_unit, base_unit
+      FROM inventory WHERE id=?
+    """, (item_id,))
     row = c.fetchone()
     if not row:
         conn.close(); return False, "Item not found"
-    base_amount, price_per_base, name = row
-    loss = float(base_amount) * float(price_per_base or 0.0)
+    base_amount, price_per_base, name, unit, ppu_legacy, base_unit = row
+    price_pb = _effective_price_per_base(price_per_base, ppu_legacy, unit, base_unit)
+    loss = float(base_amount) * float(price_pb or 0.0)
     c.execute("""
         UPDATE inventory
-        SET base_amount=0, money_lost=COALESCE(money_lost,0)+?, expired_count=COALESCE(expired_count,0)+1
+        SET base_amount=0,
+            money_lost=COALESCE(money_lost,0)+?,
+            expired_count=COALESCE(expired_count,0)+1,
+            last_used_month=strftime('%Y-%m','now')
         WHERE id=?
     """, (loss, item_id))
     conn.commit(); conn.close()
