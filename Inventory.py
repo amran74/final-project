@@ -1,4 +1,6 @@
-# Inventory.py — full upgrade: ingredients + prepared, recipes, batches, frozen state, base units, smart pricing, filters, export
+# Inventory.py — full upgrade: ingredients + prepared, recipes, batches, frozen state,
+# base units, smart pricing, filters, export, and KPI-safe logging to usage_log
+
 import streamlit as st
 from datetime import datetime, date, timedelta
 from typing import Tuple, Optional, List
@@ -9,6 +11,8 @@ import io
 from db import (
     get_connection,
     create_tables,
+    _today_keys,          # for usage_log
+    _compute_step_count,  # for step math (100g/100ml/1pc logic)
 )
 
 # -------------------------
@@ -63,7 +67,7 @@ def safely_execute(conn, sql, params=()):
     c.execute(sql, params)
     conn.commit()
 
-# --- pricing fallbacks (new) ---
+# --- pricing fallbacks (for legacy price_per_unit) ---
 def _ppu_to_price_per_base(ppu: float, unit: str, base_unit: str) -> float:
     """Convert legacy price_per_unit in 'unit' to price per base unit."""
     if not ppu or ppu <= 0:
@@ -75,11 +79,11 @@ def _ppu_to_price_per_base(ppu: float, unit: str, base_unit: str) -> float:
         if unit == "mg":   return ppu * 1000.0  # ₪/mg -> ₪/g
         return 0.0
     if base_unit == "ml":
-        if unit == "l":    return ppu / 1000.0  # ₪/L -> ₪/ml
-        if unit == "ml":   return ppu           # ₪/ml -> ₪/ml
+        if unit in ("l", "lt", "liter", "litre"): return ppu / 1000.0  # ₪/L -> ₪/ml
+        if unit == "ml":   return ppu
         return 0.0
     # pieces
-    return ppu  # ₪/piece
+    return ppu
 
 def _effective_price_per_base(price_per_base: float, price_per_unit: float, unit: str, base_unit: str) -> float:
     """Use price_per_base if set; otherwise derive from legacy price_per_unit."""
@@ -224,78 +228,143 @@ def update_item(item_id: int, name: str, expiration: str, food_type: str,
           base_amount, base_unit, kind, thaw_shelf_life_days, recipe_note, item_id))
     conn.close()
 
+# -------------------------
+# Actions (now KPI-safe: also write usage_log)
+# -------------------------
+
 def use_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, str]:
+    """
+    Use a quantity in the unit shown to the user (we pass base_unit from the UI).
+    Updates inventory and writes an entry to usage_log so home KPIs update.
+    """
     base_qty, _ = to_base(qty_ui, ui_unit)
     if base_qty <= 0:
         return False, "Quantity must be positive"
+
     conn = get_connection(); c = conn.cursor()
-    c.execute("SELECT base_amount, storage_state, COALESCE(used_count,0) FROM inventory WHERE id=?", (item_id,))
+    c.execute("SELECT base_amount, storage_state, user_id, unit FROM inventory WHERE id=?", (item_id,))
     row = c.fetchone()
     if not row:
         conn.close(); return False, "Item not found"
-    base_amount, storage_state, used_count = row
+
+    base_amount, storage_state, user_id, unit_row = row
     if storage_state == "frozen":
         conn.close(); return False, "Cannot use while frozen. Thaw first."
-    new_amount = max(0.0, float(base_amount) - base_qty)
+
+    if base_qty > float(base_amount or 0):
+        conn.close(); return False, "Not enough on hand"
+
+    new_amount = float(base_amount) - base_qty
+    step_inc = _compute_step_count(qty_ui, ui_unit)
+
     c.execute("""
         UPDATE inventory
         SET base_amount=?,
-            used_count=?,
+            used_count=COALESCE(used_count,0)+?,
             last_used_month=strftime('%Y-%m','now')
         WHERE id=?
-    """, (new_amount, int(used_count) + 1, item_id))
+    """, (new_amount, int(step_inc), item_id))
+
+    # log to usage_log
+    ts, month_key = _today_keys()
+    c.execute("""
+      INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
+      VALUES (?, ?, 'used', ?, ?, ?, 0.0, ?, ?)
+    """, (user_id, item_id, float(qty_ui), (unit_row or ui_unit), int(step_inc), ts, month_key))
+
     conn.commit(); conn.close()
     return True, f"Used {qty_ui} {ui_unit}"
 
 def expire_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, str]:
+    """
+    Expire a quantity in the displayed unit. Updates money_lost, expired_count, and usage_log.
+    """
     base_qty, _ = to_base(qty_ui, ui_unit)
     if base_qty <= 0:
         return False, "Quantity must be positive"
-    conn = get_connection(); c = conn.cursor()
-    c.execute("""
-      SELECT base_amount, price_per_base, unit, price_per_unit, base_unit
-      FROM inventory
-      WHERE id=?
-    """, (item_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close(); return False, "Item not found"
-    base_amount, price_per_base, unit, ppu_legacy, base_unit = row
-    price_pb = _effective_price_per_base(price_per_base, ppu_legacy, unit, base_unit)
-    expired_qty = min(base_qty, float(base_amount))
-    new_amount = max(0.0, float(base_amount) - expired_qty)
-    money_lost = expired_qty * float(price_pb or 0.0)
-    c.execute("""
-        UPDATE inventory
-        SET base_amount=?,
-            money_lost=COALESCE(money_lost,0)+?,
-            expired_count=COALESCE(expired_count,0)+1,
-            last_used_month=strftime('%Y-%m','now')
-        WHERE id=?
-    """, (new_amount, money_lost, item_id))
-    conn.commit(); conn.close()
-    return True, f"Expired {qty_ui} {ui_unit}. Lost ₪{money_lost:.2f}"
 
-def expire_all(item_id: int) -> Tuple[bool, str]:
     conn = get_connection(); c = conn.cursor()
     c.execute("""
-      SELECT base_amount, price_per_base, name, unit, price_per_unit, base_unit
+      SELECT user_id, base_amount, price_per_base, unit, price_per_unit, base_unit
       FROM inventory WHERE id=?
     """, (item_id,))
     row = c.fetchone()
     if not row:
         conn.close(); return False, "Item not found"
-    base_amount, price_per_base, name, unit, ppu_legacy, base_unit = row
-    price_pb = _effective_price_per_base(price_per_base, ppu_legacy, unit, base_unit)
-    loss = float(base_amount) * float(price_pb or 0.0)
+
+    user_id, base_amount, price_per_base, unit_row, ppu_legacy, base_unit = row
+    base_amount = float(base_amount or 0.0)
+    if base_amount <= 0:
+        conn.close(); return False, "Nothing to expire"
+
+    expired_base = min(base_qty, base_amount)
+    new_amount = base_amount - expired_base
+
+    price_pb = _effective_price_per_base(price_per_base, ppu_legacy, unit_row, base_unit)
+    lost_value = round(expired_base * float(price_pb or 0.0), 2)
+    step_inc = _compute_step_count(qty_ui, ui_unit)
+
+    c.execute("""
+        UPDATE inventory
+        SET base_amount=?,
+            money_lost=COALESCE(money_lost,0)+?,
+            expired_count=COALESCE(expired_count,0)+?,
+            last_used_month=strftime('%Y-%m','now')
+        WHERE id=?
+    """, (new_amount, lost_value, int(step_inc), item_id))
+
+    # log to usage_log (quantity in the UI unit user selected)
+    ts, month_key = _today_keys()
+    # if user asked to expire more than on-hand, record actual expired amount in UI units
+    expired_ui = from_base(expired_base, ui_unit)
+    c.execute("""
+      INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
+      VALUES (?, ?, 'expired', ?, ?, ?, ?, ?, ?)
+    """, (user_id, item_id, float(expired_ui), (unit_row or ui_unit), int(step_inc), float(lost_value), ts, month_key))
+
+    conn.commit(); conn.close()
+    return True, f"Expired {expired_ui:.2f} {ui_unit}. Lost ₪{lost_value:.2f}"
+
+def expire_all(item_id: int) -> Tuple[bool, str]:
+    """
+    Expire the entire remaining stock. Updates inventory and usage_log.
+    """
+    conn = get_connection(); c = conn.cursor()
+    c.execute("""
+      SELECT user_id, base_amount, price_per_base, name, unit, price_per_unit, base_unit
+      FROM inventory WHERE id=?
+    """, (item_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close(); return False, "Item not found"
+
+    user_id, base_amount, price_per_base, name, unit_row, ppu_legacy, base_unit = row
+    base_amount = float(base_amount or 0.0)
+    if base_amount <= 0:
+        conn.close(); return False, f"Nothing to expire for {name}"
+
+    price_pb = _effective_price_per_base(price_per_base, ppu_legacy, unit_row, base_unit)
+    loss = round(base_amount * float(price_pb or 0.0), 2)
+
+    # step count based on base units (100 g/ml or 1 pcs)
+    step_inc = _compute_step_count(base_amount, base_unit or "pcs")
+
     c.execute("""
         UPDATE inventory
         SET base_amount=0,
             money_lost=COALESCE(money_lost,0)+?,
-            expired_count=COALESCE(expired_count,0)+1,
+            expired_count=COALESCE(expired_count,0)+?,
             last_used_month=strftime('%Y-%m','now')
         WHERE id=?
-    """, (loss, item_id))
+    """, (loss, int(step_inc), item_id))
+
+    ts, month_key = _today_keys()
+    # log quantity in base units for clarity
+    c.execute("""
+      INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
+      VALUES (?, ?, 'expired', ?, ?, ?, ?, ?, ?)
+    """, (user_id, item_id, base_amount, (base_unit or "pcs"), int(step_inc), float(loss), ts, month_key))
+
     conn.commit(); conn.close()
     return True, f"Expired all of {name}. Lost ₪{loss:.2f}"
 
@@ -650,10 +719,10 @@ def inventory():
 
             # Smart step: kg/g => 100 g steps; l/ml => 100 ml steps; pcs => 1
             if base_unit == "g":
-                step = 100.0  # always treat weight adjustments in 100 g
+                step = 100.0
                 qty_label_unit = "g"
             elif base_unit == "ml":
-                step = 100.0  # always treat volume adjustments in 100 ml
+                step = 100.0
                 qty_label_unit = "ml"
             else:
                 step = 1.0
