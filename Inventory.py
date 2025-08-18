@@ -1,5 +1,7 @@
 # Inventory.py — full upgrade: ingredients + prepared, recipes, batches, frozen state,
 # base units, smart pricing, filters, export, and KPI-safe logging to usage_log
+# Stable@0 items show "Not stocked" (no expiry), are excluded from "expired soon",
+# and are sorted to the end via FAR_FUTURE.
 
 import streamlit as st
 from datetime import datetime, date, timedelta
@@ -22,6 +24,8 @@ from db import (
 UNITS = ["pcs", "g", "kg", "mg", "ml", "l"]
 BASE_FOR = {"pcs": "pcs", "g": "g", "kg": "g", "mg": "g", "ml": "ml", "l": "ml"}
 MULTIPLIER_TO_BASE = {"pcs": 1.0, "mg": 0.001, "g": 1.0, "kg": 1000.0, "ml": 1.0, "l": 1000.0}
+
+FAR_FUTURE = date(9999, 12, 31)  # used to park expiry for stable+zero
 
 def to_base(amount: float, unit: str) -> Tuple[float, str]:
     if unit not in BASE_FOR:
@@ -66,6 +70,12 @@ def safely_execute(conn, sql, params=()):
     c = conn.cursor()
     c.execute(sql, params)
     conn.commit()
+
+def is_stable_zero(stable: bool, base_amount: float) -> bool:
+    try:
+        return bool(stable) and float(base_amount or 0.0) <= 0.0
+    except Exception:
+        return False
 
 # --- pricing fallbacks (for legacy price_per_unit) ---
 def _ppu_to_price_per_base(ppu: float, unit: str, base_unit: str) -> float:
@@ -157,6 +167,23 @@ def status_badge(eff_exp: date, storage_state: str) -> Tuple[str, str]:
         return "Expiring Soon", "#FFA500"
     return "Fresh", "#4CAF50"
 
+def effective_expiration_display(expiration: str,
+                                 storage_state: str,
+                                 frozen_at: Optional[str],
+                                 thawed_at: Optional[str],
+                                 frozen_days_accum: int,
+                                 stable: bool,
+                                 base_amount: float):
+    """
+    Returns: (effective_date, status_text, color, no_expiry_flag)
+    If stable+zero -> grey 'Not stocked' and FAR_FUTURE date for sorting.
+    """
+    if is_stable_zero(stable, base_amount):
+        return FAR_FUTURE, "Not stocked", "#8E8E8E", True
+    eff = effective_expiration(expiration, storage_state, frozen_at, thawed_at, frozen_days_accum)
+    txt, color = status_badge(eff, storage_state)
+    return eff, txt, color, False
+
 # -------------------------
 # Data access
 # -------------------------
@@ -176,6 +203,10 @@ def add_item(
 ):
     base_amount, base_unit = to_base(ui_amount, ui_unit)
     price_per_base = compute_price_per_base(total_cost, base_amount)
+
+    # Stable @ 0 => park expiry far in the future
+    exp_to_store = (FAR_FUTURE if is_stable_zero(stable, base_amount) else parse_iso(expiration)).strftime("%Y-%m-%d")
+
     conn = get_connection()
     safely_execute(conn, """
         INSERT INTO inventory
@@ -186,7 +217,7 @@ def add_item(
         VALUES (?, ?, ?, ?, ?, ?, 0, strftime('%Y-%m','now'), ?, 0.0, 0, 0.0,
                 ?, ?, ?, ?, ?, 'fresh', NULL, NULL, 0, ?, ?)
     """, (
-        user_id, name, expiration, food_type, ui_amount, ui_unit, int(stable),
+        user_id, name, exp_to_store, food_type, ui_amount, ui_unit, int(stable),
         kind, base_unit, base_amount, total_cost, price_per_base,
         thaw_shelf_life_days, recipe_note
     ))
@@ -215,16 +246,32 @@ def delete_item(item_id: int):
 
 def update_item(item_id: int, name: str, expiration: str, food_type: str,
                 ui_amount: float, ui_unit: str, total_cost: float,
-                kind: str, thaw_shelf_life_days: Optional[int], recipe_note: Optional[str]):
+                kind: str, thaw_shelf_life_days: Optional[int], recipe_note: Optional[str],
+                stable_flag: Optional[bool] = None):
+    """
+    stable_flag is optional; when provided we will also apply the stable@0 rule to expiry.
+    """
     base_amount, base_unit = to_base(ui_amount, ui_unit)
     price_per_base = compute_price_per_base(total_cost, base_amount)
+
+    if stable_flag is None:
+        # fetch current stable flag if not passed
+        conn = get_connection(); c = conn.cursor()
+        c.execute("SELECT COALESCE(stable,0) FROM inventory WHERE id=?", (item_id,))
+        row = c.fetchone(); conn.close()
+        current_stable = bool((row[0] if row else 0))
+    else:
+        current_stable = bool(stable_flag)
+
+    exp_to_store = (FAR_FUTURE if is_stable_zero(current_stable, base_amount) else parse_iso(expiration)).strftime("%Y-%m-%d")
+
     conn = get_connection()
     safely_execute(conn, """
         UPDATE inventory
         SET name=?, expiration=?, type=?, amount=?, unit=?, total_cost=?, price_per_base=?,
             base_amount=?, base_unit=?, kind=?, thaw_shelf_life_days=?, recipe_note=?
         WHERE id=?
-    """, (name, expiration, food_type, ui_amount, ui_unit, total_cost, price_per_base,
+    """, (name, exp_to_store, food_type, ui_amount, ui_unit, total_cost, price_per_base,
           base_amount, base_unit, kind, thaw_shelf_life_days, recipe_note, item_id))
     conn.close()
 
@@ -315,7 +362,6 @@ def expire_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, st
 
     # log to usage_log (quantity in the UI unit user selected)
     ts, month_key = _today_keys()
-    # if user asked to expire more than on-hand, record actual expired amount in UI units
     expired_ui = from_base(expired_base, ui_unit)
     c.execute("""
       INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
@@ -331,22 +377,25 @@ def expire_all(item_id: int) -> Tuple[bool, str]:
     """
     conn = get_connection(); c = conn.cursor()
     c.execute("""
-      SELECT user_id, base_amount, price_per_base, name, unit, price_per_unit, base_unit
+      SELECT user_id, base_amount, price_per_base, name, unit, price_per_unit, base_unit, COALESCE(stable,0)
       FROM inventory WHERE id=?
     """, (item_id,))
     row = c.fetchone()
     if not row:
         conn.close(); return False, "Item not found"
 
-    user_id, base_amount, price_per_base, name, unit_row, ppu_legacy, base_unit = row
+    user_id, base_amount, price_per_base, name, unit_row, ppu_legacy, base_unit, stable_flag = row
     base_amount = float(base_amount or 0.0)
     if base_amount <= 0:
         conn.close(); return False, f"Nothing to expire for {name}"
 
+    # If this were a stable@0 we shouldn't be here, but guard anyway
+    if is_stable_zero(stable_flag, base_amount):
+        conn.close(); return False, f"{name} is marked stable with no stock."
+
     price_pb = _effective_price_per_base(price_per_base, ppu_legacy, unit_row, base_unit)
     loss = round(base_amount * float(price_pb or 0.0), 2)
 
-    # step count based on base units (100 g/ml or 1 pcs)
     step_inc = _compute_step_count(base_amount, base_unit or "pcs")
 
     c.execute("""
@@ -359,7 +408,6 @@ def expire_all(item_id: int) -> Tuple[bool, str]:
     """, (loss, int(step_inc), item_id))
 
     ts, month_key = _today_keys()
-    # log quantity in base units for clarity
     c.execute("""
       INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
       VALUES (?, ?, 'expired', ?, ?, ?, ?, ?, ?)
@@ -444,7 +492,7 @@ def recipe_editor(prepared_item_id: int, user_id: int):
     selected = col1.selectbox("Ingredient", options=ing_rows, format_func=_fmt, key=f"ri_sel_{prepared_item_id}")
     qty = col2.number_input("Qty base", min_value=0.0, step=1.0, value=0.0, key=f"ri_qty_{prepared_item_id}")
     if col3.button("Add or update", key=f"ri_add_{prepared_item_id}"):
-        c.execute("""
+        conn.execute("""
           INSERT INTO recipe_components(recipe_id, ingredient_item_id, quantity_base)
           VALUES (?,?,?)
           ON CONFLICT(recipe_id, ingredient_item_id) DO UPDATE SET quantity_base=excluded.quantity_base
@@ -472,7 +520,7 @@ def recipe_editor(prepared_item_id: int, user_id: int):
             d2.write(f"{q:.2f} {bu}")
             d3.write(f"₪{(ppb or 0.0):.2f}/base")
             if d4.button("Remove", key=f"ri_del_{cid}"):
-                c.execute("DELETE FROM recipe_components WHERE id=?", (cid,))
+                conn.execute("DELETE FROM recipe_components WHERE id=?", (cid,))
                 conn.commit()
                 st.warning("Removed")
                 st.experimental_rerun()
@@ -482,11 +530,11 @@ def recipe_editor(prepared_item_id: int, user_id: int):
         colu1, colu2 = st.columns([1, 2])
         new_yield = colu1.number_input("Expected yield base", min_value=0.0, step=1.0, value=0.0, key=f"ri_yield_{prepared_item_id}")
         if colu2.button("Update item cost from recipe", key=f"ri_push_{prepared_item_id}"):
-            c.execute("SELECT base_amount FROM inventory WHERE id=?", (prepared_item_id,))
-            cur_base = float(c.fetchone()[0] or 0.0)
+            conn.execute("SELECT base_amount FROM inventory WHERE id=?", (prepared_item_id,))
+            cur_base = float(conn.fetchone()[0] or 0.0)
             yield_base = float(new_yield or cur_base)
             price_per_base = (total_cost / yield_base) if yield_base > 0 else 0.0
-            c.execute("UPDATE inventory SET total_cost=?, price_per_base=? WHERE id=?", (total_cost, price_per_base, prepared_item_id))
+            conn.execute("UPDATE inventory SET total_cost=?, price_per_base=? WHERE id=?", (total_cost, price_per_base, prepared_item_id))
             conn.commit()
             st.success(f"Item updated. Price per base now ₪{price_per_base:.2f}")
             st.experimental_rerun()
@@ -589,7 +637,7 @@ def inventory():
         sort_by = l4.selectbox("Sort by", ["expiration", "name", "price per base"])
         direction = l5.selectbox("Order", ["asc", "desc"])
 
-    st.caption("Ingredient and prepared items share the same list. Prices are normalized per base unit. Frozen items pause shelf life.")
+    st.caption("Ingredient and prepared items share the same list. Prices are normalized per base unit. Frozen items pause shelf life. Stable items at 0 show as ‘Not stocked’ and don’t expire.")
 
     # add form
     with st.form("add_item_form", clear_on_submit=True):
@@ -615,6 +663,9 @@ def inventory():
         ppb = compute_price_per_base(total_cost, base_amount)
         hint_val, hint_lbl = format_price_hint(unit_ui, ppb)
         st.info(f"Stored as {base_amount:.2f} {base_unit}. Price hint {hint_val} {hint_lbl}")
+
+        if is_stable_zero(stable, base_amount):
+            st.caption("This is marked Stable and amount is 0 → expiry is not required and will be ignored.")
 
         # Clarify quantity step behavior based on selected unit
         if unit_ui in ["kg", "g"]:
@@ -664,13 +715,16 @@ def inventory():
         if kind_filter != "all" and kind != kind_filter:
             continue
 
-        eff_exp = effective_expiration(exp, storage_state, frozen_at, thawed_at, int(frozen_days_accum or 0))
+        eff_exp, status_text, color, no_expiry = effective_expiration_display(
+            exp, storage_state, frozen_at, thawed_at, int(frozen_days_accum or 0), stable, base_amount
+        )
         if state_filter == "frozen" and storage_state != "frozen":
             continue
         if state_filter == "expired soon":
-            if (eff_exp - today()).days > 2:
+            # exclude stable@0 and only include items expiring in <=2 days
+            if no_expiry or (eff_exp - today()).days > 2:
                 continue
-        filtered.append((r, eff_exp))
+        filtered.append((r, eff_exp, status_text, color, no_expiry))
 
     # sorting
     reverse = direction == "desc"
@@ -690,14 +744,12 @@ def inventory():
         return
 
     colA, colB = st.columns(2)
-    for i, (r, eff_exp) in enumerate(filtered):
+    for i, (r, eff_exp, status_text, color, no_expiry) in enumerate(filtered):
         (
             item_id, name, exp, typ, amount_ui, unit_ui, used_count, last_m, stable, ppu_legacy,
             expired_steps, money_lost, kind, base_unit, base_amount, total_cost, price_per_base,
             storage_state, frozen_at, thawed_at, frozen_days_accum, thaw_days, recipe_note
         ) = r
-
-        status_text, color = status_badge(eff_exp, storage_state)
 
         # Use effective price (handles legacy price_per_unit too)
         price_pb_display = _effective_price_per_base(price_per_base, ppu_legacy, unit_ui, base_unit)
@@ -705,11 +757,12 @@ def inventory():
 
         host = colA if i % 2 == 0 else colB
         with host:
+            exp_label = "—" if no_expiry else eff_exp.strftime("%Y-%m-%d")
             st.markdown(f"""
                 <div style='background:#1f1f1f;border-left:6px solid {color};
                             padding:14px 16px;border-radius:12px;margin-bottom:12px'>
                   <h4 style='margin:0;color:#fafafa'>{name} <span style='font-size:12px;color:#8ab4f8'>({kind})</span> <span style='font-size:12px;color:#888;'>[{typ}]</span></h4>
-                  <p style='margin:4px 0;color:#ccc;'>📅 <b>Expires:</b> {eff_exp.strftime("%Y-%m-%d")}  |  🔔 <b>{status_text}</b></p>
+                  <p style='margin:4px 0;color:#ccc;'>📅 <b>Expires:</b> {exp_label}  |  🔔 <b>{status_text}</b></p>
                   <p style='margin:4px 0;color:#ccc;'>🔢 <b>On hand:</b> {base_amount:.2f} {base_unit}  |  💲 <b>Hint:</b> ₪{hint_val} {hint_lbl}</p>
                   <p style='margin:4px 0;color:#ccc;'>✅ Used entries: {used_count}  |  🗑️ Expired entries: {expired_steps}  |  💸 Lost: ₪{round(money_lost or 0.0, 2)}</p>
                   {"<p style='margin:4px 0;color:#0ff;'>Stable item</p>" if stable else ""}
@@ -718,6 +771,7 @@ def inventory():
                 </div>
             """, unsafe_allow_html=True)
 
+            # Actions (kept here; Home page will be informational only)
             a1, a2, a3, a4, a5 = st.columns([1.2, 1.4, 1.2, 1.2, 1.2])
 
             # Smart step: kg/g => 100 g steps; l/ml => 100 ml steps; pcs => 1
@@ -734,7 +788,6 @@ def inventory():
             qty = a2.number_input(f"Qty ({qty_label_unit if base_unit in ['g','ml'] else 'pcs'})",
                                   min_value=0.0, step=step, value=0.0, key=f"qty_{item_id}")
 
-            # We pass base_unit so 100 means 100 g / 100 ml when applicable
             if a1.button("Use qty", key=f"use_{item_id}"):
                 ok, msg = use_quantity(item_id, qty, base_unit)
                 if ok:
@@ -781,7 +834,9 @@ def inventory():
 
             with st.expander("Edit"):
                 new_name = st.text_input("Name", value=name, key=f"nm_{item_id}")
-                new_exp = st.date_input("Expiration", value=parse_iso(exp), key=f"ex_{item_id}")
+                # Keep the picker visible; we override on save if stable@0
+                new_exp = st.date_input("Expiration (ignored while Stable & 0 on hand)",
+                                        value=parse_iso(exp), key=f"ex_{item_id}")
                 new_typ = st.text_input("Type", value=typ, key=f"tp_{item_id}")
 
                 ui_unit_choice = st.selectbox("Display unit", UNITS, index=UNITS.index(unit_ui) if unit_ui in UNITS else 0, key=f"uiunit_{item_id}")
@@ -794,6 +849,7 @@ def inventory():
 
                 if st.button("Save", key=f"save_{item_id}"):
                     try:
+                        # We need stable flag to apply the stable@0 rule on expiry
                         update_item(
                             item_id=item_id,
                             name=new_name.strip(),
@@ -804,7 +860,8 @@ def inventory():
                             total_cost=float(new_total),
                             kind=new_kind,
                             thaw_shelf_life_days=int(new_thaw_days) if new_thaw_days else None,
-                            recipe_note=new_recipe.strip() if new_recipe else None
+                            recipe_note=new_recipe.strip() if new_recipe else None,
+                            stable_flag=bool(stable),
                         )
                         st.success("Saved"); st.rerun()
                     except Exception as e:
