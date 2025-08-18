@@ -35,7 +35,7 @@ def from_base(amount_base: float, ui_unit: str) -> float:
         return amount_base / 1000.0
     if ui_unit == "ml":
         return amount_base
-    return amount_base
+    return amount_base  # pcs
 
 def format_price_hint(ui_unit: str, price_per_base: float) -> Tuple[str, str]:
     if ui_unit in ["kg", "g", "mg"]:
@@ -64,7 +64,7 @@ def safely_execute(conn, sql, params=()):
     conn.commit()
 
 # -------------------------
-# One time migrations
+# One-time migrations
 # -------------------------
 
 MIGRATIONS = [
@@ -81,10 +81,8 @@ MIGRATIONS = [
     ("ALTER TABLE inventory ADD COLUMN recipe_note TEXT",),
     ("ALTER TABLE inventory ADD COLUMN money_lost REAL DEFAULT 0.0",),
     ("ALTER TABLE inventory ADD COLUMN expired_count INTEGER DEFAULT 0",),
-    # recipe tables
     ("CREATE TABLE IF NOT EXISTS recipes (id INTEGER PRIMARY KEY AUTOINCREMENT, prepared_item_id INTEGER NOT NULL UNIQUE)",),
     ("CREATE TABLE IF NOT EXISTS recipe_components (id INTEGER PRIMARY KEY AUTOINCREMENT, recipe_id INTEGER NOT NULL, ingredient_item_id INTEGER NOT NULL, quantity_base REAL NOT NULL, UNIQUE(recipe_id, ingredient_item_id))",),
-    # simple batches for prepared food
     ("CREATE TABLE IF NOT EXISTS batches (id INTEGER PRIMARY KEY AUTOINCREMENT, prepared_item_id INTEGER NOT NULL, cooked_at TEXT NOT NULL, total_yield_base REAL NOT NULL, portion_size_base REAL NOT NULL, remaining_base REAL NOT NULL, expiration TEXT, storage_state TEXT DEFAULT 'fresh', frozen_at TEXT, thawed_at TEXT, frozen_days_accum INTEGER DEFAULT 0, batch_cost REAL)",),
 ]
 
@@ -495,17 +493,24 @@ def inventory():
         total_cost = d3.number_input("Total cost ₪", min_value=0.0, step=0.1, value=0.0)
 
         stable = st.checkbox("Stable item keep visible at zero")
-        recipe_note = None
-        thaw_days = None
 
-        if kind == "prepared":
-            recipe_note = st.text_area("Recipe quick note optional", placeholder="Short ingredients list or link")
+        # Notes live here (applies to both ingredient and prepared)
+        recipe_note = st.text_area("Notes optional", placeholder="Anything to remember about this item or recipe")
+
         thaw_days = st.number_input("Days safe after thaw optional", min_value=0, step=1, value=0)
 
         base_amount, base_unit = to_base(amount_ui, unit_ui)
         ppb = compute_price_per_base(total_cost, base_amount)
         hint_val, hint_lbl = format_price_hint(unit_ui, ppb)
         st.info(f"Stored as {base_amount:.2f} {base_unit}. Price hint {hint_val} {hint_lbl}")
+
+        # Clarify quantity step behavior based on selected unit
+        if unit_ui in ["kg", "g"]:
+            st.caption("Adjustments later use 100 g steps.")
+        elif unit_ui in ["l", "ml"]:
+            st.caption("Adjustments later use 100 ml steps.")
+        else:
+            st.caption("Adjustments later use steps of 1 piece.")
 
         submitted = st.form_submit_button("Add item")
         if submitted:
@@ -522,7 +527,7 @@ def inventory():
                     total_cost=float(total_cost),
                     kind=kind,
                     stable=stable,
-                    recipe_note=recipe_note,
+                    recipe_note=recipe_note.strip() if recipe_note else None,
                     thaw_shelf_life_days=int(thaw_days) if thaw_days else None
                 )
                 st.success("Added")
@@ -594,16 +599,27 @@ def inventory():
                   <p style='margin:4px 0;color:#ccc;'>✅ Used entries: {used_count}  |  🗑️ Expired entries: {expired_steps}  |  💸 Lost: ₪{round(money_lost or 0.0, 2)}</p>
                   {"<p style='margin:4px 0;color:#0ff;'>Stable item</p>" if stable else ""}
                   {"<p style='margin:4px 0;color:#a0ffa0;'>Frozen</p>" if storage_state=='frozen' else ""}
-                  {f"<p style='margin:4px 0;color:#ccc;'>Recipe note: {recipe_note}</p>" if recipe_note else ""}
+                  {f"<p style='margin:4px 0;color:#ccc;'>Notes: {recipe_note}</p>" if recipe_note else ""}
                 </div>
             """, unsafe_allow_html=True)
 
             a1, a2, a3, a4, a5 = st.columns([1.2, 1.4, 1.2, 1.2, 1.2])
 
-            # quantity input in base units by default
-            step = 0.1 if base_unit in ["g", "ml"] else 1.0
-            qty = a2.number_input("Qty base", min_value=0.0, step=step, value=0.0, key=f"qty_{item_id}")
+            # Smart step: kg/g => 100 g steps; l/ml => 100 ml steps; pcs => 1
+            if base_unit == "g":
+                step = 100.0  # always treat weight adjustments in 100 g
+                qty_label_unit = "g"
+            elif base_unit == "ml":
+                step = 100.0  # always treat volume adjustments in 100 ml
+                qty_label_unit = "ml"
+            else:
+                step = 1.0
+                qty_label_unit = "pcs"
 
+            qty = a2.number_input(f"Qty ({qty_label_unit if base_unit in ['g','ml'] else 'pcs'})",
+                                  min_value=0.0, step=step, value=0.0, key=f"qty_{item_id}")
+
+            # We pass base_unit so 100 means 100 g / 100 ml when applicable
             if a1.button("Use qty", key=f"use_{item_id}"):
                 ok, msg = use_quantity(item_id, qty, base_unit)
                 if ok:
@@ -653,15 +669,13 @@ def inventory():
                 new_exp = st.date_input("Expiration", value=parse_iso(exp), key=f"ex_{item_id}")
                 new_typ = st.text_input("Type", value=typ, key=f"tp_{item_id}")
 
-                # show friendly fields, still store normalized
-                # allow user to switch displayed unit
                 ui_unit_choice = st.selectbox("Display unit", UNITS, index=UNITS.index(unit_ui) if unit_ui in UNITS else 0, key=f"uiunit_{item_id}")
                 display_amount = from_base(base_amount, ui_unit_choice)
                 new_amount_ui = st.number_input("Amount", min_value=0.0, value=float(display_amount), step=0.1, key=f"am_{item_id}")
                 new_total = st.number_input("Total cost ₪", min_value=0.0, value=float(total_cost or 0.0), step=0.1, key=f"tt_{item_id}")
                 new_kind = st.selectbox("Kind", ["ingredient", "prepared"], index=["ingredient", "prepared"].index(kind) if kind in ["ingredient", "prepared"] else 0, key=f"kd_{item_id}")
                 new_thaw_days = st.number_input("Days safe after thaw optional", min_value=0, step=1, value=int(thaw_days or 0), key=f"td_{item_id}")
-                new_recipe = st.text_area("Recipe note", value=recipe_note or "", key=f"rc_{item_id}")
+                new_recipe = st.text_area("Notes", value=recipe_note or "", key=f"rc_{item_id}")
 
                 if st.button("Save", key=f"save_{item_id}"):
                     try:
