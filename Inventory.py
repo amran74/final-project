@@ -1,7 +1,7 @@
 # Inventory.py — ingredients + prepared, recipes, batches, frozen state,
 # base units, smart pricing, filters, export, KPI-safe logging,
-# Stable@0 -> "Not stocked" (no expiry), and auto-delete for non-stable @0.
-# NOW: explicit Delete button + startup cleanup sweep.
+# Stable@0 -> "Not stocked" (no expiry), auto-delete for non-stable @0,
+# explicit Delete button, and startup cleanup (expired & depleted).
 
 import streamlit as st
 from datetime import datetime, date, timedelta
@@ -82,27 +82,28 @@ def _auto_delete_if_zero(conn, item_id: int, new_base_amount: float, stable_flag
         return True
     return False
 
-# pricing fallback (legacy price_per_unit)
+# --- pricing fallbacks (legacy price_per_unit) ---
 def _ppu_to_price_per_base(ppu: float, unit: str, base_unit: str) -> float:
     if not ppu or ppu <= 0:
         return 0.0
     unit = (unit or "").lower()
     if base_unit == "g":
-        if unit == "kg":   return ppu / 1000.0
-        if unit == "g":    return ppu
-        if unit == "mg":   return ppu * 1000.0
+        if unit == "kg":   return ppu / 1000.0  # ₪/kg -> ₪/g
+        if unit == "g":    return ppu           # ₪/g
+        if unit == "mg":   return ppu * 1000.0  # ₪/mg -> ₪/g
         return 0.0
     if base_unit == "ml":
-        if unit in ("l", "lt", "liter", "litre"): return ppu / 1000.0
+        if unit in ("l", "lt", "liter", "litre"): return ppu / 1000.0  # ₪/L -> ₪/ml
         if unit == "ml":   return ppu
         return 0.0
-    return ppu
+    return ppu  # pieces
 
 def _effective_price_per_base(price_per_base: float, price_per_unit: float, unit: str, base_unit: str) -> float:
+    """Use price_per_base if set; otherwise derive from legacy price_per_unit."""
     return float(price_per_base or 0.0) if (price_per_base or 0) > 0 else _ppu_to_price_per_base(float(price_per_unit or 0.0), unit, base_unit)
 
 # -------------------------
-# Migrations
+# One-time migrations
 # -------------------------
 
 MIGRATIONS = [
@@ -146,7 +147,7 @@ def run_migrations():
     conn.close()
 
 # -------------------------
-# Expiration helpers
+# Expiration with frozen pause
 # -------------------------
 
 def effective_expiration(expiration: str, storage_state: str, frozen_at: Optional[str], thawed_at: Optional[str], frozen_days_accum: int) -> date:
@@ -258,7 +259,7 @@ def update_item(item_id: int, name: str, expiration: str, food_type: str,
         return
 
 # -------------------------
-# Actions (KPI-safe + auto-delete)
+# Actions (KPI-safe + auto-delete when depleted)
 # -------------------------
 
 def use_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, str]:
@@ -461,7 +462,7 @@ def recipe_editor(prepared_item_id: int, user_id: int):
     selected = col1.selectbox("Ingredient", options=ing_rows, format_func=_fmt, key=f"ri_sel_{prepared_item_id}")
     qty = col2.number_input("Qty base", min_value=0.0, step=1.0, value=0.0, key=f"ri_qty_{prepared_item_id}")
     if col3.button("Add or update", key=f"ri_add_{prepared_item_id}"):
-        conn.execute("""
+        c.execute("""
           INSERT INTO recipe_components(recipe_id, ingredient_item_id, quantity_base)
           VALUES (?,?,?)
           ON CONFLICT(recipe_id, ingredient_item_id) DO UPDATE SET quantity_base=excluded.quantity_base
@@ -489,7 +490,7 @@ def recipe_editor(prepared_item_id: int, user_id: int):
             d2.write(f"{q:.2f} {bu}")
             d3.write(f"₪{(ppb or 0.0):.2f}/base")
             if d4.button("Remove", key=f"ri_del_{cid}"):
-                conn.execute("DELETE FROM recipe_components WHERE id=?", (cid,))
+                c.execute("DELETE FROM recipe_components WHERE id=?", (cid,))
                 conn.commit()
                 st.warning("Removed")
                 st.experimental_rerun()
@@ -499,11 +500,12 @@ def recipe_editor(prepared_item_id: int, user_id: int):
         colu1, colu2 = st.columns([1, 2])
         new_yield = colu1.number_input("Expected yield base", min_value=0.0, step=1.0, value=0.0, key=f"ri_yield_{prepared_item_id}")
         if colu2.button("Update item cost from recipe", key=f"ri_push_{prepared_item_id}"):
-            conn.execute("SELECT base_amount FROM inventory WHERE id=?", (prepared_item_id,))
-            cur_base = float(conn.fetchone()[0] or 0.0) if hasattr(conn, "fetchone") else 0.0
+            cx = conn.cursor()
+            cx.execute("SELECT base_amount FROM inventory WHERE id=?", (prepared_item_id,))
+            cur_base = float((cx.fetchone() or [0])[0] or 0.0)
             yield_base = float(new_yield or cur_base)
             price_per_base = (total_cost / yield_base) if yield_base > 0 else 0.0
-            conn.execute("UPDATE inventory SET total_cost=?, price_per_base=? WHERE id=?", (total_cost, price_per_base, prepared_item_id))
+            cx.execute("UPDATE inventory SET total_cost=?, price_per_base=? WHERE id=?", (total_cost, price_per_base, prepared_item_id))
             conn.commit()
             st.success(f"Item updated. Price per base now ₪{price_per_base:.2f}")
             st.experimental_rerun()
@@ -584,7 +586,7 @@ def export_csv(rows: List[tuple]) -> bytes:
     return out.getvalue().encode("utf-8")
 
 # -------------------------
-# Startup cleanup (safety sweep)
+# Startup cleanup (safety sweeps)
 # -------------------------
 
 def cleanup_depleted_items(user_id: int) -> int:
@@ -597,6 +599,49 @@ def cleanup_depleted_items(user_id: int) -> int:
     deleted = c.rowcount or 0
     conn.commit(); conn.close()
     return deleted
+
+def cleanup_expired_items(user_id: int) -> int:
+    """Auto-expire & delete any expired (effective date) non-stable items, logging KPI loss."""
+    conn = get_connection(); c = conn.cursor()
+    c.execute("""
+        SELECT id, user_id, base_amount, price_per_base, unit, price_per_unit, base_unit, name,
+               expiration, storage_state, frozen_at, thawed_at, COALESCE(frozen_days_accum,0),
+               COALESCE(stable,0)
+        FROM inventory
+        WHERE user_id=?
+    """, (user_id,))
+    rows = c.fetchall()
+
+    removed = 0
+    ts, month_key = _today_keys()
+    for (item_id, uid, base_amt, ppb, unit_row, ppu_legacy, base_unit, nm,
+         expiration, storage_state, frozen_at, thawed_at, frozen_days_accum, stable_flag) in rows:
+
+        if int(stable_flag or 0) != 0:
+            continue  # only handle non-stable here
+        base_amt = float(base_amt or 0.0)
+        if base_amt <= 0:
+            continue
+
+        eff_exp = effective_expiration(expiration, storage_state, frozen_at, thawed_at, int(frozen_days_accum or 0))
+        if eff_exp >= today():
+            continue
+
+        # compute loss and log
+        price_pb = _effective_price_per_base(ppb, ppu_legacy, unit_row, base_unit)
+        loss = round(base_amt * float(price_pb or 0.0), 2)
+        step_inc = _compute_step_count(base_amt, base_unit or "pcs")
+        c.execute("""
+          INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
+          VALUES (?, ?, 'expired', ?, ?, ?, ?, ?, ?)
+        """, (uid, item_id, base_amt, (base_unit or "pcs"), int(step_inc), float(loss), ts, month_key))
+
+        # delete the item
+        c.execute("DELETE FROM inventory WHERE id=?", (item_id,))
+        removed += 1
+
+    conn.commit(); conn.close()
+    return removed
 
 # -------------------------
 # UI
@@ -612,10 +657,14 @@ def inventory():
     create_tables()
     run_migrations()
 
-    # safety sweep
-    removed = cleanup_depleted_items(user_id)
-    if removed:
-        st.info(f"Cleaned {removed} depleted item(s).")
+    # safety sweeps
+    removed_zeros = cleanup_depleted_items(user_id)
+    removed_expired = cleanup_expired_items(user_id)
+    if removed_zeros or removed_expired:
+        msg = []
+        if removed_zeros: msg.append(f"cleaned {removed_zeros} depleted")
+        if removed_expired: msg.append(f"auto-removed {removed_expired} expired")
+        st.info(", ".join(msg) + " item(s).")
 
     with st.container():
         l1, l2, l3, l4, l5 = st.columns([2, 1.2, 1.2, 1, 1])
