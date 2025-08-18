@@ -490,5 +490,5 @@ def inventory():
 
             # quick info on thaw shelf life if relevant
             if storage_state != "frozen" and thaw_days:
-                st.caption(f"After thaw consume within about {thaw_days} day(s)").
+                st.caption(f"After thaw consume within about {thaw_days} day(s)")
 
