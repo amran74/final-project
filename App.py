@@ -1,3 +1,16 @@
+# App.py — Smart Inventory Manager (fixed ordering, safe imports)
+
+from datetime import date
+import streamlit as st
+
+# ================== Page config (must come before anything Streamlit) ==================
+st.set_page_config(
+    page_title="Smart Inventory Manager",
+    page_icon="🍴",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
 # --- Pages ---
 from CalendarView import calendar_view
 from home import home
@@ -16,14 +29,6 @@ from SmartCoach import coach
 # --- DB helpers ---
 from db import create_tables, reset_monthly_counters, get_connection, get_monthly_summary
 
-# ================== Page config ==================
-st.set_page_config(
-    page_title="Smart Inventory Manager",
-    page_icon="🍴",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
 # ================== Styles (nav no-wrap + compact, consistent pills) ==================
 st.markdown("""
 <style>
@@ -36,9 +41,9 @@ st.markdown("""
 
 /* Tell Streamlit columns that contain nav buttons to stop stretching and wrapping */
 div[data-testid="column"] > div:has(.navbtn) {
-  flex: 0 0 auto !important;       /* don't grow or shrink */
+  flex: 0 0 auto !important;
   min-width: 0 !important;
-  white-space: nowrap !important;   /* keep children on one line */
+  white-space: nowrap !important;
 }
 
 /* The nav pill itself */
@@ -64,16 +69,14 @@ div[data-testid="column"] .navbtn > button {
   font-size: 14px !important;
   font-weight: 500 !important;
 
-  white-space: nowrap !important;    /* force single line */
+  white-space: nowrap !important;
   overflow: hidden !important;
   text-overflow: ellipsis !important;
   line-height: 1 !important;
 }
 
 /* Inner elements inside Streamlit's button sometimes re-wrap; shut that down */
-.navbtn > button * {
-  white-space: nowrap !important;
-}
+.navbtn > button * { white-space: nowrap !important; }
 
 /* Active state */
 .navbtn.active > button {
@@ -87,7 +90,6 @@ div[data-testid="column"] .navbtn > button {
 .navbtn > button:focus { outline:none !important; box-shadow:none !important; }
 </style>
 """, unsafe_allow_html=True)
-
 
 # ================== One-time DB sanity ==================
 create_tables()
@@ -104,7 +106,7 @@ PAGES = {
 PAGE_KEYS = list(PAGES.keys())
 ALIAS = {
     "home": "🏡 Home",
-    "inventory": "📦 Inv",
+    "inventory": "📦 Stock",
     "coach": "🧠 Coach",
     "ai": "🤖 AI",
     "dashboard": "📊 Stats",
@@ -115,7 +117,8 @@ def _user_name() -> str:
     return st.session_state.get("name") or st.session_state.get("phone") or "User"
 
 def _kpis(user_id: int):
-    conn = get_connection(); c = conn.cursor()
+    conn = get_connection()
+    c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM inventory WHERE user_id=?", (user_id,))
     total_items = c.fetchone()[0] or 0
     ms = get_monthly_summary(user_id)
@@ -124,7 +127,7 @@ def _kpis(user_id: int):
 
 def _goto(label: str):
     st.session_state["__page"] = label
-    st.toast(label.replace("📦","").replace("🏡","").replace("🧠","").replace("🤖","").replace("📊","").strip(), icon="➡️")
+    st.toast(label.strip("📦🏡🧠🤖📊 "), icon="➡️")
 
 # ================== Global post-login interceptor ==================
 if st.session_state.get("just_logged_in"):
@@ -145,21 +148,15 @@ if not st.session_state.get("authenticated"):
     home()
     st.stop()
 
-# ================== Jump handler (from CalendarView quick buttons) ==================
+# ================== Jump handler ==================
 if st.session_state.get("jump"):
     nav = st.session_state.pop("nav", None)
     st.session_state.pop("jump", None)
-    if nav == "inventory":
-        st.session_state["__page"] = "📦 Inventory"
-    elif nav == "ai":
-        st.session_state["__page"] = "🤖 AI Assistant"
-    elif nav == "dashboard":
-        st.session_state["__page"] = "📊 Dashboard"
-    elif nav == "home":
-        st.session_state["__page"] = "🏡 Home"
+    if nav in ALIAS:
+        st.session_state["__page"] = ALIAS[nav]
     st.rerun()
 
-# ================== Initial page selection (deep link aware) ==================
+# ================== Initial page selection ==================
 if "__page" not in st.session_state:
     target = st.session_state.pop("post_login_target", None)
     if not target:
@@ -179,12 +176,10 @@ with st.container():
 
     with a:
         st.markdown("### 💡 Smart Inventory")
-        lcol = st.columns(2)
-        with lcol[0]:
-            if st.button("🔐 Logout", key="logout", use_container_width=False):
-                for k in ["authenticated", "user_id", "phone", "name", "__page", "post_login_target"]:
-                    st.session_state.pop(k, None)
-                st.rerun()
+        if st.button("🔐 Logout", key="logout"):
+            for k in ["authenticated", "user_id", "phone", "name", "__page", "post_login_target"]:
+                st.session_state.pop(k, None)
+            st.rerun()
 
     with b:
         uid = st.session_state.get("user_id")
@@ -193,23 +188,20 @@ with st.container():
             items, used, expired, lost = _kpis(uid)
         k1, k2, k3, k4 = st.columns(4)
         with k1: st.markdown(f"<div class='kpi'><div class='val'>{items}</div><div class='lbl'>Items</div></div>", unsafe_allow_html=True)
-        with k2: st.markdown(f"<div class='kpi'><div class='val'>{used}</div><div class='lbl'>Used steps (mo)</div></div>", unsafe_allow_html=True)
-        with k3: st.markdown(f"<div class='kpi'><div class='val'>{expired}</div><div class='lbl'>Expired steps (mo)</div></div>", unsafe_allow_html=True)
+        with k2: st.markdown(f"<div class='kpi'><div class='val'>{used}</div><div class='lbl'>Used (mo)</div></div>", unsafe_allow_html=True)
+        with k3: st.markdown(f"<div class='kpi'><div class='val'>{expired}</div><div class='lbl'>Expired (mo)</div></div>", unsafe_allow_html=True)
         with k4: st.markdown(f"<div class='kpi'><div class='val'>₪{lost:.2f}</div><div class='lbl'>Money lost (mo)</div></div>", unsafe_allow_html=True)
 
     with c:
         st.markdown(f"<div style='text-align:right;color:#9bd7ff;font-weight:600;'>👋 {_user_name()}</div>", unsafe_allow_html=True)
-        # Fixed-width, no-wrap nav (kept in columns, but CSS forces single-line buttons)
         n1, n2, n3, n4, n5 = st.columns(5)
-        nav_cols = [n1, n2, n3, n4, n5]
         for i, label in enumerate(PAGE_KEYS):
             active = " active" if st.session_state["__page"] == label else ""
-            with nav_cols[i]:
+            with [n1, n2, n3, n4, n5][i]:
                 st.markdown(f"<div class='navbtn{active}'>", unsafe_allow_html=True)
-                if st.button(label, key=f"nav_{i}", use_container_width=True):
+                if st.button(label, key=f"nav_{i}"):
                     _goto(label)
                 st.markdown("</div>", unsafe_allow_html=True)
-
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ================== Render current page ==================
