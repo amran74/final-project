@@ -1,4 +1,4 @@
-# db.py — cleaned and safe
+# db.py — safe schema, includes reset_monthly_counters, no side effects on import
 import sqlite3
 from datetime import datetime, date
 from typing import Optional, Tuple
@@ -19,14 +19,10 @@ def get_connection() -> sqlite3.Connection:
 # ==============================
 
 def _ensure_column(c: sqlite3.Cursor, table: str, col: str, ddl: str) -> None:
-    """
-    Add column if missing, using PRAGMA table_info instead of selecting a non-existent column.
-    `ddl` must be a full: ALTER TABLE "<table>" ADD COLUMN "<col>" <TYPE ...>
-    """
     table_quoted = table.strip().strip('"')
     col_quoted = col.strip().strip('"')
     c.execute(f'PRAGMA table_info("{table_quoted}")')
-    existing = {row[1] for row in c.fetchall()}  # row[1] is column name
+    existing = {row[1] for row in c.fetchall()}
     if col_quoted not in existing:
         c.execute(ddl)
 
@@ -37,7 +33,6 @@ def _ensure_column(c: sqlite3.Cursor, table: str, col: str, ddl: str) -> None:
 def create_tables() -> None:
     """
     Create base tables and apply additive migrations without destroying existing data.
-    Order matters: create base, then extend with _ensure_column.
     """
     conn = get_connection()
     c = conn.cursor()
@@ -73,17 +68,12 @@ def create_tables() -> None:
             last_used_month TEXT DEFAULT '',
             stable INTEGER DEFAULT 0,
             price_per_unit REAL DEFAULT 0.0,
+            money_lost REAL DEFAULT 0.0,
+            frozen_until TEXT,
+            perishability INTEGER DEFAULT 2,
             FOREIGN KEY(user_id) REFERENCES users(id)
         )
     """)
-
-    # Inventory extras (additive, safe)
-    _ensure_column(c, "inventory", "money_lost",
-                   'ALTER TABLE "inventory" ADD COLUMN "money_lost" REAL DEFAULT 0.0')
-    _ensure_column(c, "inventory", "frozen_until",
-                   'ALTER TABLE "inventory" ADD COLUMN "frozen_until" TEXT')
-    _ensure_column(c, "inventory", "perishability",
-                   'ALTER TABLE "inventory" ADD COLUMN "perishability" INTEGER DEFAULT 2')
 
     # --- Usage log (base; legacy compatible) ---
     c.execute("""
@@ -222,7 +212,7 @@ def _one_step_qty_in_unit(unit: str) -> float:
         return 0.1
     return 1.0
 
-def _today_keys() -> Tuple[str, str]:
+def _today_keys():
     ts = datetime.now()
     return ts.isoformat(timespec="seconds"), ts.strftime("%Y-%m")
 
@@ -411,8 +401,31 @@ def get_monthly_summary(user_id: int, month_key: Optional[str] = None) -> dict:
     }
 
 # ==============================
-# Ensure schema on import
+# Monthly reset (App.py imports this)
 # ==============================
+
+def reset_monthly_counters() -> None:
+    """
+    If an item's last_used_month != current month, zero used_count and expired_count,
+    then stamp last_used_month to current month. Runs once at app start.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    current_month = date.today().strftime("%Y-%m")
+    c.execute("SELECT id, last_used_month FROM inventory")
+    rows = c.fetchall()
+    for item_id, last_month in rows:
+        if (last_month or "") != current_month:
+            c.execute("""
+                UPDATE inventory
+                SET used_count = 0,
+                    expired_count = 0,
+                    last_used_month = ?
+                WHERE id = ?
+            """, (current_month, item_id))
+    conn.commit()
+    conn.close()
+
+# Run migrations ONLY when executed directly, not on import
 if __name__ == "__main__":
     create_tables()
-
