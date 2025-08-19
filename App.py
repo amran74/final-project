@@ -23,10 +23,12 @@ except ModuleNotFoundError:
     from inventory import inventory
 
 # Shopping page (capital/lowercase fallback just like Inventory)
+# App.py
 try:
-    from Shopping import shopping
+    from Shopping import shopping as shopping_page
 except ModuleNotFoundError:
-    from shopping import shopping
+    from shopping import shopping as shopping_page
+
 
 from AI_Assistant import ai_assistant
 from dashboard import dashboard
