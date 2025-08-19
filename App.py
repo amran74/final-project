@@ -3,7 +3,7 @@
 from datetime import date
 import streamlit as st
 
-# ================== Page config (must come before anything Streamlit) ==================
+# ================== Page config ==================
 st.set_page_config(
     page_title="Smart Inventory Manager",
     page_icon="🍴",
@@ -16,19 +16,15 @@ from CalendarView import calendar_view
 from home import home
 
 try:
-    # Works if the file is named Inventory.py (capital I)
     from Inventory import inventory
 except ModuleNotFoundError:
-    # Fallback if it's inventory.py (lowercase i)
     from inventory import inventory
 
-# Shopping page (capital/lowercase fallback just like Inventory)
-# App.py
+# Shopping page (capital/lowercase fallback)
 try:
     from Shopping import shopping as shopping_page
 except ModuleNotFoundError:
     from shopping import shopping as shopping_page
-
 
 from AI_Assistant import ai_assistant
 from dashboard import dashboard
@@ -37,7 +33,7 @@ from SmartCoach import coach
 # --- DB helpers ---
 from db import create_tables, reset_monthly_counters, get_connection, get_monthly_summary
 
-# ================== Styles (nav no-wrap + compact, consistent pills) ==================
+# ================== Styles ==================
 st.markdown("""
 <style>
 .block-container { padding-top: 1rem; }
@@ -46,15 +42,13 @@ st.markdown("""
 .kpi .val { font-weight:700; font-size:20px; color:#e8f2ff; }
 .kpi .lbl { font-size:12px; color:#9bb3c7; }
 
-/* Prevent nav wrapping */
 div[data-testid="column"] > div:has(.navbtn) {
   flex: 0 0 auto !important;
   min-width: 0 !important;
   white-space: nowrap !important;
 }
 .navbtn { display:inline-block; }
-.navbtn > button,
-div[data-testid="column"] .navbtn > button {
+.navbtn > button {
   min-width: 132px !important;
   max-width: 132px !important;
   height: 42px !important;
@@ -89,23 +83,23 @@ div[data-testid="column"] .navbtn > button {
 create_tables()
 reset_monthly_counters()
 
-# ================== Page registry (insertion order = nav order) ==================
+# ================== Page registry ==================
 PAGES = {
     "🏡 Home": calendar_view,
     "📦 Stock": inventory,
-    "🛒 Shopping": shopping,     # ← new page
+    "🛒 Shopping": shopping_page,   # ✅ fixed name
     "🧠 Coach": coach,
     "🤖 AI": ai_assistant,
     "📊 Stats": dashboard,
 }
 PAGE_KEYS = list(PAGES.keys())
 
-# URL aliases like ?page=shopping
+# URL aliases
 ALIAS = {
     "home": "🏡 Home",
     "inventory": "📦 Stock",
     "stock": "📦 Stock",
-    "shopping": "🛒 Shopping",   # ← new alias
+    "shopping": "🛒 Shopping",
     "coach": "🧠 Coach",
     "ai": "🤖 AI",
     "dashboard": "📊 Stats",
@@ -195,7 +189,6 @@ with st.container():
     with c:
         st.markdown(f"<div style='text-align:right;color:#9bd7ff;font-weight:600;'>👋 {_user_name()}</div>", unsafe_allow_html=True)
 
-        # ---- Dynamic nav: 1 button per page key ----
         nav_cols = st.columns(len(PAGE_KEYS))
         for i, label in enumerate(PAGE_KEYS):
             active = " active" if st.session_state["__page"] == label else ""
