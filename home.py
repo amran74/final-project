@@ -1,4 +1,4 @@
-# home.py — lively auth screen (animated bg, hero image, per-tab accents, fixed z-index)
+# home.py — lively auth screen (animated bg behind app, hero image, per‑tab accents)
 import streamlit as st
 from typing import Tuple
 import db
@@ -27,39 +27,31 @@ def _inject_css(accent: str = "#2f6feb"):
         --bg2: #0f1a39;
       }}
 
-      /* Animated background BELOW content */
+      /* Base background */
       .stApp {{
-        background: radial-gradient(1200px 600px at 15% 10%, var(--bg2), var(--bg1)) fixed;
-        position: relative;
+        background: radial-gradient(1200px 600px at 15% 10%, var(--bg2), var(--bg1)) fixed !important;
       }}
-      .stApp:before {{
-        content: "";
-        position: fixed; inset: -40%;
-        z-index: 0; /* keep behind everything */
+
+      /* Animated swirl lives BEHIND app via real element, not :before */
+      #bg-swirl {{
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        z-index: -1;      /* keep background behind everything */
         background: conic-gradient(from 0deg at 50% 50%,
-                    rgba(58,160,255,0.10),
+                    rgba(58,160,255,0.08),
                     rgba(18,22,41,0.0) 35%,
-                    rgba(58,160,255,0.10) 70%,
+                    rgba(58,160,255,0.08) 70%,
                     rgba(18,22,41,0.0));
         animation: swirl 18s linear infinite;
         filter: blur(60px);
         pointer-events: none;
       }}
-      @keyframes swirl {{ 0%{{transform:rotate(0deg)}} 100%{{transform:rotate(360deg)}} }}
+      @keyframes swirl {{ 0% {{transform:rotate(0deg)}} 100% {{transform:rotate(360deg)}} }}
 
-      /* Layout containers ABOVE background */
-      .auth-wrap, .auth-card, .hero, .art {{ position: relative; z-index: 2; }}
-
-      /* Hero container */
+      /* Layout containers (normal z-index now) */
       .auth-wrap {{ max-width: 1100px; margin: 5vh auto 7rem; padding: 0 16px; }}
-      .hero {{
-        display: grid;
-        grid-template-columns: 1.2fr 1fr;
-        gap: 26px;
-      }}
-      @media (max-width: 980px) {{
-        .hero {{ grid-template-columns: 1fr; }}
-      }}
+      .hero {{ display: grid; grid-template-columns: 1.2fr 1fr; gap: 26px; }}
+      @media (max-width: 980px) {{ .hero {{ grid-template-columns: 1fr; }} }}
 
       /* Auth card */
       .auth-card {{
@@ -69,19 +61,16 @@ def _inject_css(accent: str = "#2f6feb"):
         border-radius: 22px;
         padding: 26px 26px 20px;
         box-shadow: 0 18px 50px rgba(0,0,0,0.35);
+        position: relative;
       }}
-
-      /* Accent glow ring */
       .auth-card:after {{
         content:"";
         position:absolute; inset:-2px;
-        border-radius:24px;
-        padding:1px;
+        border-radius:24px; padding:1px;
         background: linear-gradient(180deg, var(--accent), rgba(255,255,255,0));
         -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
         -webkit-mask-composite: xor; mask-composite: exclude;
-        opacity:.18;
-        pointer-events:none;
+        opacity:.18; pointer-events:none;
       }}
 
       /* Header shimmer */
@@ -131,7 +120,7 @@ def _inject_css(accent: str = "#2f6feb"):
       .stButton>button:active {{ transform: translateY(1px); }}
       .stButton>button:hover {{ filter: brightness(1.05); }}
 
-      /* Right illustration card */
+      /* Right illustration */
       .art {{
         background: rgba(18,22,41,0.55);
         border: 1px solid rgba(65,108,181,0.22);
@@ -140,15 +129,13 @@ def _inject_css(accent: str = "#2f6feb"):
         box-shadow: 0 14px 40px rgba(0,0,0,0.3);
         min-height: 100%;
       }}
-      .art img {{
-        width: 100%; border-radius: 16px;
-        box-shadow: 0 10px 28px rgba(0,0,0,0.35);
-      }}
+      .art img {{ width: 100%; border-radius: 16px; box-shadow: 0 10px 28px rgba(0,0,0,0.35); }}
 
-      /* Utility */
+      /* Meter */
       .meter {{ height: 8px; border-radius: 999px; background:#172036; border:1px solid #24314b; }}
       .meter > div {{ height: 100%; border-radius: 999px; }}
     </style>
+    <div id="bg-swirl"></div>
     """, unsafe_allow_html=True)
 
 def _strength_meter(score: int):
@@ -162,7 +149,7 @@ def _strength_meter(score: int):
 # View
 # ---------------------------
 def home():
-    # base accent for the page load
+    # base accent for first paint
     _inject_css("#2f6feb")
 
     st.markdown('<div class="auth-wrap">', unsafe_allow_html=True)
