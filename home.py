@@ -1,4 +1,4 @@
-# home.py — lively auth screen (animated bg, hero image, per-tab accents)
+# home.py — lively auth screen (animated bg, hero image, per-tab accents, fixed z-index)
 import streamlit as st
 from typing import Tuple
 import db
@@ -18,7 +18,7 @@ def _password_strength(pw: str) -> Tuple[int, str]:
 # ---------------------------
 # CSS + helpers
 # ---------------------------
-def _inject_css(accent="#2f6feb"):
+def _inject_css(accent: str = "#2f6feb"):
     st.markdown(f"""
     <style>
       :root {{
@@ -27,21 +27,28 @@ def _inject_css(accent="#2f6feb"):
         --bg2: #0f1a39;
       }}
 
-      /* Animated background */
+      /* Animated background BELOW content */
       .stApp {{
         background: radial-gradient(1200px 600px at 15% 10%, var(--bg2), var(--bg1)) fixed;
         position: relative;
-        overflow: hidden;
       }}
       .stApp:before {{
         content: "";
         position: fixed; inset: -40%;
-        background: conic-gradient(from 0deg at 50% 50%, rgba(58,160,255,0.10), rgba(18,22,41,0.0) 35%, rgba(58,160,255,0.10) 70%, rgba(18,22,41,0.0));
+        z-index: 0; /* keep behind everything */
+        background: conic-gradient(from 0deg at 50% 50%,
+                    rgba(58,160,255,0.10),
+                    rgba(18,22,41,0.0) 35%,
+                    rgba(58,160,255,0.10) 70%,
+                    rgba(18,22,41,0.0));
         animation: swirl 18s linear infinite;
         filter: blur(60px);
         pointer-events: none;
       }}
       @keyframes swirl {{ 0%{{transform:rotate(0deg)}} 100%{{transform:rotate(360deg)}} }}
+
+      /* Layout containers ABOVE background */
+      .auth-wrap, .auth-card, .hero, .art {{ position: relative; z-index: 2; }}
 
       /* Hero container */
       .auth-wrap {{ max-width: 1100px; margin: 5vh auto 7rem; padding: 0 16px; }}
@@ -54,7 +61,7 @@ def _inject_css(accent="#2f6feb"):
         .hero {{ grid-template-columns: 1fr; }}
       }}
 
-      /* Card left */
+      /* Auth card */
       .auth-card {{
         background: rgba(18, 22, 41, 0.78);
         border: 1px solid rgba(65,108,181,0.28);
@@ -62,7 +69,6 @@ def _inject_css(accent="#2f6feb"):
         border-radius: 22px;
         padding: 26px 26px 20px;
         box-shadow: 0 18px 50px rgba(0,0,0,0.35);
-        position: relative;
       }}
 
       /* Accent glow ring */
@@ -78,7 +84,7 @@ def _inject_css(accent="#2f6feb"):
         pointer-events:none;
       }}
 
-      /* Header shimmer bar */
+      /* Header shimmer */
       .shimmer {{
         height: 12px; border-radius: 999px; width: 85%;
         background: linear-gradient(90deg, rgba(255,255,255,0.05), rgba(255,255,255,0.12), rgba(255,255,255,0.05));
@@ -116,7 +122,9 @@ def _inject_css(accent="#2f6feb"):
       .stButton>button {{
         width:100%; height:44px; border-radius:12px;
         border: 1px solid rgba(31,59,106,0.9);
-        background: linear-gradient(180deg, color-mix(in hsl, var(--accent) 92%, #fff 0%), color-mix(in hsl, var(--accent) 70%, #000 0%));
+        background: linear-gradient(180deg,
+          color-mix(in hsl, var(--accent) 92%, #fff 0%),
+          color-mix(in hsl, var(--accent) 70%, #000 0%));
         color:#fff; font-weight:600;
         transition: transform .03s ease, filter .15s ease;
       }}
@@ -130,25 +138,20 @@ def _inject_css(accent="#2f6feb"):
         border-radius: 22px; padding: 14px;
         display:flex; align-items:center; justify-content:center;
         box-shadow: 0 14px 40px rgba(0,0,0,0.3);
+        min-height: 100%;
       }}
       .art img {{
         width: 100%; border-radius: 16px;
         box-shadow: 0 10px 28px rgba(0,0,0,0.35);
       }}
 
-      /* Rows */
-      .row {{ display:flex; gap:12px; }}
-      .col {{ flex:1; }}
-
-      /* Strength bar */
+      /* Utility */
       .meter {{ height: 8px; border-radius: 999px; background:#172036; border:1px solid #24314b; }}
       .meter > div {{ height: 100%; border-radius: 999px; }}
-
     </style>
     """, unsafe_allow_html=True)
 
 def _strength_meter(score: int):
-    # color per score
     color = ["#e05252","#f2a93b","#e5d04a","#35c06d","#12d48b"][score]
     st.markdown(
         f"""<div class="meter"><div style="width:{(score/4)*100}%; background:{color}"></div></div>""",
@@ -159,12 +162,13 @@ def _strength_meter(score: int):
 # View
 # ---------------------------
 def home():
-    # default accent
+    # base accent for the page load
     _inject_css("#2f6feb")
-    st.markdown('<div class="auth-wrap">', unsafe_allow_html=True)
 
+    st.markdown('<div class="auth-wrap">', unsafe_allow_html=True)
     left, right = st.columns([1.15, 0.85], vertical_alignment="center")
 
+    # ---- Left: Form card ----
     with left:
         st.markdown('<div class="auth-card">', unsafe_allow_html=True)
         st.markdown('<div class="shimmer"></div>', unsafe_allow_html=True)
@@ -192,7 +196,7 @@ def home():
                     st.session_state["user_id"] = user[0]
                     st.session_state["phone"] = user[1]
                     st.session_state["name"] = user[2]
-                    st.session_state["just_logged_in"] = True
+                    st.session_state["just_logged_in"] = True  # App.py listens for this
                     st.success("Welcome back.")
                     st.rerun()
                 else:
@@ -231,8 +235,7 @@ def home():
             _inject_css("#f59e0b")
             st.write("")
             phone_f = st.text_input("📱 Phone number", key="rec_phone")
-            find = st.button("Find account", key="find_acc")
-            if find:
+            if st.button("Find account", key="find_acc"):
                 if not phone_f:
                     st.error("Enter your phone number.")
                 else:
@@ -249,14 +252,16 @@ def home():
                                 st.error("Incorrect answer.")
                     else:
                         st.error("No account with that phone.")
+
         st.markdown("</div>", unsafe_allow_html=True)
 
+    # ---- Right: Illustration ----
     with right:
-        # Illustration: pick any public image you like; this one is neutral and clean.
         st.markdown('<div class="art">', unsafe_allow_html=True)
         st.image(
-            "https://images.unsplash.com/photo-1557825835-70d97c4aa067?q=80&w=1600&auto=format&fit=crop",  # keyboard/workspace aesthetic
-            use_container_width=True
+            # Clean workspace photo; swap to your own hosted image if you prefer
+            "https://images.unsplash.com/photo-1557825835-70d97c4aa067?q=80&w=1600&auto=format&fit=crop",
+            use_container_width=True,
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
