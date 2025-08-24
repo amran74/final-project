@@ -143,4 +143,5 @@ def home():
             else:
                 st.error("❌ Phone not found.")
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)1
+    
