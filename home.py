@@ -1,4 +1,4 @@
-# home.py — split layout (hero left, auth right), zero top gap
+# home.py — clean split layout, zero weird top gap
 import streamlit as st
 from typing import Tuple
 import db
@@ -18,7 +18,7 @@ def _password_strength(pw: str) -> Tuple[int, str]:
     return score, labels[min(score, 4)]
 
 # ---------------------------
-# CSS (kill top gap + tidy layout)
+# CSS — trim top padding, style panels
 # ---------------------------
 def _inject_css():
     st.markdown("""
@@ -28,27 +28,11 @@ def _inject_css():
         --accent:#3b82f6; --text:#eaf1ff; --muted:#9fb1d2; --input:#0f1731;
       }
 
-      /* Remove Streamlit header + any phantom spacing */
-      header[data-testid="stHeader"]{ display:none !important; }
-      [data-testid="stToolbar"]{ display:none !important; }
-      .stApp header{ display:none !important; }
-      .block-container{ padding-top: 0 !important; }
-
       .stApp{
         background: radial-gradient(1200px 600px at 12% 12%, var(--bg2), var(--bg1)) fixed !important;
       }
-
-      /* grid frame pinned to top */
-      .frame{
-        display:grid;
-        grid-template-columns: 1.1fr min(520px, 42vw);
-        gap:24px;
-        align-items:start;
-        margin-top: 8px;   /* tiny breathing room */
-      }
-      @media (max-width: 1000px){
-        .frame{ grid-template-columns: 1fr; }
-      }
+      /* Cut default Streamlit top padding without breaking toolbar */
+      .block-container{ padding-top: 8px !important; padding-bottom: 16px !important; }
 
       /* hero panel */
       .hero{
@@ -97,7 +81,7 @@ def _inject_css():
         box-shadow:0 0 0 2px var(--accent); border-color:var(--accent);
       }
 
-      /* buttons */
+      /* button */
       .stButton>button{
         width:100%; height:44px; border-radius:12px;
         border:1px solid rgba(31,59,106,.9);
@@ -107,7 +91,6 @@ def _inject_css():
       .stButton>button:active{ transform: translateY(1px); }
       .stButton>button:hover{ filter: brightness(1.05); }
 
-      /* password meter */
       .meter{ height:8px; border-radius:999px; background:#172036; border:1px solid #24314b; }
       .meter>div{ height:100%; border-radius:999px; }
     </style>
@@ -124,11 +107,10 @@ def _strength_meter(score:int):
 def home():
     _inject_css()
 
-    # ------- GRID WRAPPER -------
-    st.markdown('<div class="frame">', unsafe_allow_html=True)
+    # Use native Streamlit columns to avoid phantom gaps
+    left, right = st.columns([1.15, 1.0], vertical_alignment="start")
 
-    # ------- LEFT: HERO -------
-    with st.container():
+    with left:
         st.markdown(
             """
             <div class="hero">
@@ -157,91 +139,90 @@ def home():
             unsafe_allow_html=True
         )
 
-    # ------- RIGHT: AUTH CARD -------
-    st.markdown('<div class="auth-card">', unsafe_allow_html=True)
-    st.markdown('<div class="brand"><span class="emoji">🔐</span><h2>Welcome back</h2></div>', unsafe_allow_html=True)
-    st.markdown('<div class="brand-sub">Sign in or create an account in seconds.</div>', unsafe_allow_html=True)
+    with right:
+        st.markdown('<div class="auth-card">', unsafe_allow_html=True)
+        st.markdown('<div class="brand"><span class="emoji">🔐</span><h2>Welcome back</h2></div>', unsafe_allow_html=True)
+        st.markdown('<div class="brand-sub">Sign in or create an account in seconds.</div>', unsafe_allow_html=True)
 
-    tab_login, tab_register, tab_recover = st.tabs(["🔑 Login", "🆕 Register", "♻ Recover"])
+        tab_login, tab_register, tab_recover = st.tabs(["🔑 Login", "🆕 Register", "♻ Recover"])
 
-    # ----- Login -----
-    with tab_login:
-        with st.form("login_form", clear_on_submit=False):
-            phone = st.text_input("📱 Phone number", max_chars=20, key="login_phone")
-            pw    = st.text_input("🔒 Password", type="password", key="login_pw")
-            st.checkbox("Remember me", value=True, key="remember_me")
-            submitted = st.form_submit_button("Login")
-        if submitted:
-            user = db.authenticate_user(phone, pw)
-            if user:
-                st.session_state["authenticated"] = True
-                st.session_state["user_id"] = user[0]
-                st.session_state["phone"]   = user[1]
-                st.session_state["name"]    = user[2]
-                st.session_state["just_logged_in"] = True
-                st.success("Welcome back.")
-                st.rerun()
-            else:
-                st.error("Invalid phone or password.")
-
-    # ----- Register -----
-    with tab_register:
-        c1, c2 = st.columns(2)
-        with c1:
-            phone_r = st.text_input("📱 Phone number", max_chars=20, key="reg_phone")
-            name_r  = st.text_input("👤 Name", key="reg_name")
-            pw_r    = st.text_input("🔒 Password", type="password", key="reg_pw")
-        with c2:
-            secret_q = st.text_input("❓ Secret question (for recovery)", key="reg_q")
-            secret_a = st.text_input("📝 Secret answer", key="reg_a")
-            if pw_r:
-                score, label = _password_strength(pw_r)
-                _strength_meter(score)
-                st.caption(label)
-
-        agree = st.checkbox("I agree to the Terms of Use and Privacy Policy", value=True)
-        if st.button("Register", disabled=not agree, key="register_btn"):
-            if not phone_r or not pw_r or not name_r:
-                st.error("Please fill in all required fields.")
-            else:
-                ok = db.create_user(phone_r, pw_r, name_r, secret_q, secret_a)
-                if ok:
-                    st.success("Account created. You can now log in.")
-                else:
-                    st.error("Phone number already exists.")
-
-    # ----- Recover -----
-    with tab_recover:
-        phone_f = st.text_input("📱 Phone number", key="rec_phone")
-        if st.button("Find account", key="find_acc"):
-            if not phone_f:
-                st.error("Enter your phone number.")
-            else:
-                user = db.get_user_by_phone(phone_f)
+        # Login
+        with tab_login:
+            with st.form("login_form", clear_on_submit=False):
+                phone = st.text_input("📱 Phone number", max_chars=20, key="login_phone")
+                pw    = st.text_input("🔒 Password", type="password", key="login_pw")
+                st.checkbox("Remember me", value=True, key="remember_me")
+                submitted = st.form_submit_button("Login")
+            if submitted:
+                user = db.authenticate_user(phone, pw)
                 if user:
-                    st.session_state["recovery"] = {
-                        "phone": phone_f,
-                        "q": (user[3] if len(user) > 3 and user[3] else "—"),
-                        "a": (user[4] if len(user) > 4 and user[4] else "")
-                    }
+                    st.session_state["authenticated"] = True
+                    st.session_state["user_id"] = user[0]
+                    st.session_state["phone"]   = user[1]
+                    st.session_state["name"]    = user[2]
+                    st.session_state["just_logged_in"] = True
+                    st.success("Welcome back.")
+                    st.rerun()
                 else:
-                    st.error("No account with that phone.")
+                    st.error("Invalid phone or password.")
 
-        rec = st.session_state.get("recovery")
-        if rec:
-            st.info(f"Secret question: {rec['q']}")
-            ans   = st.text_input("📝 Your answer", key="rec_ans")
-            newpw = st.text_input("🔑 New password", type="password", key="rec_new")
-            if st.button("Reset password", key="reset_pw"):
-                if (ans or "").strip().lower() == (rec["a"] or "").strip().lower():
-                    db.update_password_by_phone(rec["phone"], newpw)
-                    st.success("Password updated. You can log in now.")
-                    st.session_state.pop("recovery", None)
+        # Register
+        with tab_register:
+            c1, c2 = st.columns(2)
+            with c1:
+                phone_r = st.text_input("📱 Phone number", max_chars=20, key="reg_phone")
+                name_r  = st.text_input("👤 Name", key="reg_name")
+                pw_r    = st.text_input("🔒 Password", type="password", key="reg_pw")
+            with c2:
+                secret_q = st.text_input("❓ Secret question (for recovery)", key="reg_q")
+                secret_a = st.text_input("📝 Secret answer", key="reg_a")
+                if pw_r:
+                    score, label = _password_strength(pw_r)
+                    _strength_meter(score)
+                    st.caption(label)
+
+            agree = st.checkbox("I agree to the Terms of Use and Privacy Policy", value=True)
+            if st.button("Register", disabled=not agree, key="register_btn"):
+                if not phone_r or not pw_r or not name_r:
+                    st.error("Please fill in all required fields.")
                 else:
-                    st.error("Incorrect answer.")
+                    ok = db.create_user(phone_r, pw_r, name_r, secret_q, secret_a)
+                    if ok:
+                        st.success("Account created. You can now log in.")
+                    else:
+                        st.error("Phone number already exists.")
 
-    st.markdown('</div>', unsafe_allow_html=True)  # close auth-card
-    st.markdown('</div>', unsafe_allow_html=True)  # close frame
+        # Recover
+        with tab_recover:
+            phone_f = st.text_input("📱 Phone number", key="rec_phone")
+            if st.button("Find account", key="find_acc"):
+                if not phone_f:
+                    st.error("Enter your phone number.")
+                else:
+                    user = db.get_user_by_phone(phone_f)
+                    if user:
+                        st.session_state["recovery"] = {
+                            "phone": phone_f,
+                            "q": (user[3] if len(user) > 3 and user[3] else "—"),
+                            "a": (user[4] if len(user) > 4 and user[4] else "")
+                        }
+                    else:
+                        st.error("No account with that phone.")
+
+            rec = st.session_state.get("recovery")
+            if rec:
+                st.info(f"Secret question: {rec['q']}")
+                ans   = st.text_input("📝 Your answer", key="rec_ans")
+                newpw = st.text_input("🔑 New password", type="password", key="rec_new")
+                if st.button("Reset password", key="reset_pw"):
+                    if (ans or "").strip().lower() == (rec["a"] or "").strip().lower():
+                        db.update_password_by_phone(rec["phone"], newpw)
+                        st.success("Password updated. You can log in now.")
+                        st.session_state.pop("recovery", None)
+                    else:
+                        st.error("Incorrect answer.")
+
+        st.markdown('</div>', unsafe_allow_html=True)  # close auth-card
 
 if __name__ == "__main__":
     home()
