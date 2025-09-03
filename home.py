@@ -27,7 +27,6 @@ def _inject_css():
         --bg1:#090e21; --bg2:#0f1733; --panel:#101833e6; --border:#24365a;
         --accent:#3b82f6; --text:#eaf1ff; --muted:#9fb1d2; --input:#0f1731;
       }
-
       .stApp{
         background: radial-gradient(1200px 600px at 12% 12%, var(--bg2), var(--bg1)) fixed !important;
       }
@@ -80,8 +79,6 @@ def _inject_css():
       .stTextInput>div>div:focus-within, .stPassword>div>div:focus-within, .stTextArea>div>div:focus-within{
         box-shadow:0 0 0 2px var(--accent); border-color:var(--accent);
       }
-
-      /* button */
       .stButton>button{
         width:100%; height:44px; border-radius:12px;
         border:1px solid rgba(31,59,106,.9);
@@ -107,8 +104,8 @@ def _strength_meter(score:int):
 def home():
     _inject_css()
 
-    # Use native Streamlit columns to avoid phantom gaps
-    left, right = st.columns([1.15, 1.0], vertical_alignment="start")
+    # Use native Streamlit columns (no vertical_alignment)
+    left, right = st.columns([1.15, 1.0])
 
     with left:
         st.markdown(
