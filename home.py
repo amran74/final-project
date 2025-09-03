@@ -1,4 +1,4 @@
-# home.py — split layout (hero left, auth right), tidy spacing, no giant top gap
+# home.py — split layout (hero left, auth right), zero top gap
 import streamlit as st
 from typing import Tuple
 import db
@@ -18,7 +18,7 @@ def _password_strength(pw: str) -> Tuple[int, str]:
     return score, labels[min(score, 4)]
 
 # ---------------------------
-# CSS
+# CSS (kill top gap + tidy layout)
 # ---------------------------
 def _inject_css():
     st.markdown("""
@@ -28,18 +28,23 @@ def _inject_css():
         --accent:#3b82f6; --text:#eaf1ff; --muted:#9fb1d2; --input:#0f1731;
       }
 
+      /* Remove Streamlit header + any phantom spacing */
+      header[data-testid="stHeader"]{ display:none !important; }
+      [data-testid="stToolbar"]{ display:none !important; }
+      .stApp header{ display:none !important; }
+      .block-container{ padding-top: 0 !important; }
+
       .stApp{
         background: radial-gradient(1200px 600px at 12% 12%, var(--bg2), var(--bg1)) fixed !important;
       }
-      .block-container{ padding-top: 0.5rem !important; padding-bottom: 1.2rem !important; }
 
-      /* grid frame */
+      /* grid frame pinned to top */
       .frame{
         display:grid;
         grid-template-columns: 1.1fr min(520px, 42vw);
         gap:24px;
         align-items:start;
-        margin-top:30px;
+        margin-top: 8px;   /* tiny breathing room */
       }
       @media (max-width: 1000px){
         .frame{ grid-template-columns: 1fr; }
@@ -87,7 +92,7 @@ def _inject_css():
       .stTextInput>div>div, .stPassword>div>div, .stTextArea>div>div{
         border-radius:12px; border:1px solid #27334f; background:var(--input);
       }
-      .stTextInput input, .stTextArea textarea{ color:var(--text); }
+      .stTextInput input, .stTextArea textarea{ color:#eaf1ff; }
       .stTextInput>div>div:focus-within, .stPassword>div>div:focus-within, .stTextArea>div>div:focus-within{
         box-shadow:0 0 0 2px var(--accent); border-color:var(--accent);
       }
