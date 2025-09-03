@@ -1,4 +1,4 @@
-# home.py — split layout (hero left, auth right), tidy spacing, responsive
+# home.py — split layout (hero left, auth right), tidy spacing, no giant top gap
 import streamlit as st
 from typing import Tuple
 import db
@@ -31,13 +31,18 @@ def _inject_css():
       .stApp{
         background: radial-gradient(1200px 600px at 12% 12%, var(--bg2), var(--bg1)) fixed !important;
       }
-      .block-container{ padding-top: 1.2rem !important; padding-bottom: 1.2rem !important; }
+      .block-container{ padding-top: 0.5rem !important; padding-bottom: 1.2rem !important; }
 
       /* grid frame */
-      .frame{ min-height: calc(100vh - 2.4rem); display:grid; gap:24px;
-              grid-template-columns: 1.1fr min(520px, 42vw); align-items:center; }
+      .frame{
+        display:grid;
+        grid-template-columns: 1.1fr min(520px, 42vw);
+        gap:24px;
+        align-items:start;
+        margin-top:30px;
+      }
       @media (max-width: 1000px){
-        .frame{ grid-template-columns: 1fr; align-items:start; }
+        .frame{ grid-template-columns: 1fr; }
       }
 
       /* hero panel */
@@ -54,7 +59,6 @@ def _inject_css():
       }
       .bar{ height:12px; border-radius:10px; background:#1b2646; }
       .bar.accent{ background: linear-gradient(90deg,#4b8bf7,#2f6feb); }
-
       .bullet{ display:flex; gap:10px; align-items:flex-start; color:#cfe3ff; margin:6px 0; }
       .dot{ width:8px; height:8px; border-radius:999px; background:#59a2ff; margin-top:7px; }
 
@@ -75,7 +79,7 @@ def _inject_css():
       .brand h2{ font-size: 22px; margin:0; color:var(--text); letter-spacing:.2px; }
       .brand-sub{ margin:2px 0 12px 32px; color:var(--muted); font-size:13px; }
 
-      /* tabs and inputs */
+      /* tabs + inputs */
       .stTabs [data-baseweb="tab-list"]{ gap:6px; }
       .stTabs [data-baseweb="tab"]{ background:#0f152c; color:#cfe3ff; border-radius:12px 12px 0 0;
                                     padding:8px 14px; border:1px solid #1e2a44; }
@@ -155,7 +159,7 @@ def home():
 
     tab_login, tab_register, tab_recover = st.tabs(["🔑 Login", "🆕 Register", "♻ Recover"])
 
-    # ----- Login (uses a form so Enter works) -----
+    # ----- Login -----
     with tab_login:
         with st.form("login_form", clear_on_submit=False):
             phone = st.text_input("📱 Phone number", max_chars=20, key="login_phone")
@@ -201,7 +205,7 @@ def home():
                 else:
                     st.error("Phone number already exists.")
 
-    # ----- Recover (simple two-step inline) -----
+    # ----- Recover -----
     with tab_recover:
         phone_f = st.text_input("📱 Phone number", key="rec_phone")
         if st.button("Find account", key="find_acc"):
@@ -234,6 +238,5 @@ def home():
     st.markdown('</div>', unsafe_allow_html=True)  # close auth-card
     st.markdown('</div>', unsafe_allow_html=True)  # close frame
 
-# Entrypoint for Streamlit multipage use
 if __name__ == "__main__":
     home()
