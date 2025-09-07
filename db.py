@@ -1,4 +1,4 @@
-# db.py — safe schema, monthly KPIs via usage_log, correct money_lost with fallbacks
+# db.py — safe schema, monthly KPIs via usage_log, correct money_lost with fallbacks11
 import sqlite3
 from datetime import datetime, date
 from typing import Optional, Tuple
