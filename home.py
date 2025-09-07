@@ -3,7 +3,7 @@ import streamlit as st
 from typing import Tuple
 import db
 
-st.set_page_config(page_title="Smart Inventory | Sign in", page_icon="🔐", layout="wide")
+# ❌ REMOVE set_page_config here — keep it only in app.py
 
 def _password_strength(pw: str) -> Tuple[int, str]:
     score = 0
