@@ -23,7 +23,8 @@ from db import (
 UNITS = ["pcs", "g", "kg", "mg", "ml", "l"]
 BASE_FOR = {"pcs": "pcs", "g": "g", "kg": "g", "mg": "g", "ml": "ml", "l": "ml"}
 MULTIPLIER_TO_BASE = {"pcs": 1.0, "mg": 0.001, "g": 1.0, "kg": 1000.0, "ml": 1.0, "l": 1000.0}
-FAR_FUTURE = date(9999, 12, 31)
+# Use a sane far future so Streamlit's internal +10y range won't overflow
+FAR_FUTURE = date(2099, 12, 31)
 
 def to_base(amount: float, unit: str) -> Tuple[float, str]:
     if unit not in BASE_FOR:
@@ -377,12 +378,14 @@ def expire_all(item_id: int) -> Tuple[bool, str]:
         conn.commit(); conn.close()
         return True, f"Expired all of {name}. Lost ₪{loss:.2f} (removed)"
     else:
+        ff = FAR_FUTURE.strftime("%Y-%m-%d")
         c.execute("""
             UPDATE inventory
             SET base_amount=0, money_lost=COALESCE(money_lost,0)+?, expired_count=COALESCE(expired_count,0)+?,
-                last_used_month=strftime('%Y-%m','now')
+                last_used_month=strftime('%Y-%m','now'),
+                expiration=?, storage_state='fresh', frozen_at=NULL, thawed_at=NULL
             WHERE id=?
-        """, (loss, int(step_inc), item_id))
+        """, (loss, int(step_inc), ff, item_id))
         conn.commit(); conn.close()
         return True, f"Expired all of {name}. Lost ₪{loss:.2f}"
 
@@ -517,11 +520,11 @@ def recipe_editor(prepared_item_id: int, user_id: int):
 def create_batch(prepared_item_id: int):
     with st.expander("Create batch for this prepared item"):
         col1, col2, col3 = st.columns(3)
-        cooked = col1.date_input("Cooked at", value=today(), key=f"b_dt_{prepared_item_id}")
+        cooked = col1.date_input("Cooked at", value=today(), max_value=FAR_FUTURE, key=f"b_dt_{prepared_item_id}")
         total_yield_base = col2.number_input("Total yield base", min_value=0.0, step=1.0, value=0.0, key=f"b_ty_{prepared_item_id}")
         portion_size_base = col3.number_input("Portion size base", min_value=0.0, step=1.0, value=0.0, key=f"b_ps_{prepared_item_id}")
         e1, e2 = st.columns(2)
-        batch_exp = e1.date_input("Batch expiration", value=today(), key=f"b_ex_{prepared_item_id}")
+        batch_exp = e1.date_input("Batch expiration", value=today(), max_value=FAR_FUTURE, key=f"b_ex_{prepared_item_id}")
         batch_cost = e2.number_input("Batch cost override ₪", min_value=0.0, step=0.1, value=0.0, key=f"b_cost_{prepared_item_id}")
         if st.button("Create batch", key=f"b_create_{prepared_item_id}"):
             conn = get_connection()
@@ -587,6 +590,25 @@ def export_csv(rows: List[tuple]) -> bytes:
 
 # -------------------------
 # Startup cleanup (safety sweeps)
+def normalize_stable_zero_expiry(user_id: int) -> int:
+    """Update stable items at 0 to use far-future expiration so they never show as "expiring soon"."""
+    conn = get_connection(); c = conn.cursor()
+    ff = FAR_FUTURE.strftime("%Y-%m-%d")
+    c.execute(
+        """
+        UPDATE inventory
+        SET expiration=?
+        WHERE user_id=?
+          AND COALESCE(stable,0)=1
+          AND COALESCE(base_amount,0)<=0
+          AND date(expiration) < date(?)
+        """,
+        (ff, user_id, ff),
+    )
+    updated = c.rowcount or 0
+    conn.commit(); conn.close()
+    return updated
+
 # -------------------------
 
 def cleanup_depleted_items(user_id: int) -> int:
@@ -601,7 +623,14 @@ def cleanup_depleted_items(user_id: int) -> int:
     return deleted
 
 def cleanup_expired_items(user_id: int) -> int:
-    """Auto-expire & delete any expired (effective date) non-stable items, logging KPI loss."""
+    """
+    Auto-handle any items whose effective expiration is today or earlier.
+
+    - Non-stable: expire full remaining quantity (log value), then DELETE the row.
+    - Stable: expire full remaining quantity (log value), set base_amount=0 and push expiration
+      to FAR_FUTURE so it becomes "Not stocked".
+    Returns how many non-stable rows were removed.
+    """
     conn = get_connection(); c = conn.cursor()
     c.execute("""
         SELECT id, user_id, base_amount, price_per_base, unit, price_per_unit, base_unit, name,
@@ -617,28 +646,42 @@ def cleanup_expired_items(user_id: int) -> int:
     for (item_id, uid, base_amt, ppb, unit_row, ppu_legacy, base_unit, nm,
          expiration, storage_state, frozen_at, thawed_at, frozen_days_accum, stable_flag) in rows:
 
-        if int(stable_flag or 0) != 0:
-            continue  # only handle non-stable here
         base_amt = float(base_amt or 0.0)
         if base_amt <= 0:
             continue
 
         eff_exp = effective_expiration(expiration, storage_state, frozen_at, thawed_at, int(frozen_days_accum or 0))
-        if eff_exp >= today():
-            continue
+        if eff_exp > today():
+            continue  # not expired yet
 
-        # compute loss and log
         price_pb = _effective_price_per_base(ppb, ppu_legacy, unit_row, base_unit)
         loss = round(base_amt * float(price_pb or 0.0), 2)
         step_inc = _compute_step_count(base_amt, base_unit or "pcs")
+
+        # Log to usage_log so monthly KPIs can read it
         c.execute("""
           INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
           VALUES (?, ?, 'expired', ?, ?, ?, ?, ?, ?)
         """, (uid, item_id, base_amt, (base_unit or "pcs"), int(step_inc), float(loss), ts, month_key))
 
-        # delete the item
-        c.execute("DELETE FROM inventory WHERE id=?", (item_id,))
-        removed += 1
+        if int(stable_flag or 0) == 0:
+            # Non-stable: delete the row entirely
+            c.execute("DELETE FROM inventory WHERE id=?", (item_id,))
+            removed += 1
+        else:
+            # Stable: zero out and park in far future so it shows as "Not stocked"
+            ff = FAR_FUTURE.strftime("%Y-%m-%d")
+            c.execute("""
+                UPDATE inventory
+                SET base_amount=0,
+                    money_lost=COALESCE(money_lost,0)+?,
+                    expired_count=COALESCE(expired_count,0)+?,
+                    expiration=?,
+                    storage_state='fresh',
+                    frozen_at=NULL,
+                    thawed_at=NULL
+                WHERE id=?
+            """, (loss, int(step_inc), ff, item_id))
 
     conn.commit(); conn.close()
     return removed
@@ -658,10 +701,12 @@ def inventory():
     run_migrations()
 
     # safety sweeps
+    fixed_stable0 = normalize_stable_zero_expiry(user_id)
     removed_zeros = cleanup_depleted_items(user_id)
     removed_expired = cleanup_expired_items(user_id)
-    if removed_zeros or removed_expired:
+    if fixed_stable0 or removed_zeros or removed_expired:
         msg = []
+        if fixed_stable0: msg.append(f"fixed {fixed_stable0} stable@0 expiry")
         if removed_zeros: msg.append(f"cleaned {removed_zeros} depleted")
         if removed_expired: msg.append(f"auto-removed {removed_expired} expired")
         st.info(", ".join(msg) + " item(s).")
@@ -682,7 +727,7 @@ def inventory():
         name = c1.text_input("Name")
         kind = c2.selectbox("Kind", ["ingredient", "prepared"])
         typ = c3.selectbox("Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"])
-        exp = c4.date_input("Expiration", value=today(), min_value=today())
+        exp = c4.date_input("Expiration", value=today(), min_value=today(), max_value=FAR_FUTURE)
 
         d1, d2, d3 = st.columns([1, 1, 1])
         amount_ui = d1.number_input("Amount", min_value=0.0, step=0.1, value=1.0)
@@ -844,7 +889,9 @@ def inventory():
             with st.expander("Edit"):
                 new_name = st.text_input("Name", value=name, key=f"nm_{item_id}")
                 new_exp = st.date_input("Expiration (ignored while Stable & 0 on hand)",
-                                        value=parse_iso(exp), key=f"ex_{item_id}")
+                                        value=min(parse_iso(exp), FAR_FUTURE),
+                                        max_value=FAR_FUTURE,
+                                        key=f"ex_{item_id}")
                 new_typ = st.text_input("Type", value=typ, key=f"tp_{item_id}")
 
                 ui_unit_choice = st.selectbox("Display unit", UNITS, index=UNITS.index(unit_ui) if unit_ui in UNITS else 0, key=f"uiunit_{item_id}")

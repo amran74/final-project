@@ -1,254 +1,344 @@
-# CalendarView.py — Premium info-only Home Dashboard (no actions)
-import streamlit as st
+# CalendarView.py — Homepage with Time-of-Day Banner
+# Sections:
+#   - Hero banner (changes with hour)
+#   - Notifications (today + next 3 days)
+#   - Expiring this week (top 5)
+#   - Recent activity (last 5)
+#   - Quick links
+#   - Optional week calendar (expander)
+
+from __future__ import annotations
+
 from datetime import date, datetime, timedelta
-from streamlit_calendar import calendar
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import streamlit as st
 import db
 
-# Optional AI tips (safe fallback if not configured)
+# Optional calendar widget
 try:
-    import openai  # type: ignore
-    _AI_OK = True
+    from streamlit_calendar import calendar as _calendar
 except Exception:
-    _AI_OK = False
+    _calendar = None
 
-# ========= CONFIG =========
-CALENDAR_HEIGHT = 450
-MAX_UPCOMING_ITEMS = 6
-RISK_SOON_DAYS = 2
-RISK_WEEK_DAYS = 7
+# Banner assets folder (commit images to: assets/banners/)
+ASSETS_DIR = Path(__file__).parent / "assets" / "banners"
 
+# --------------------------------------------------------------------------------
+# Utils
+# --------------------------------------------------------------------------------
+def _days_left(d: date) -> int:
+    return (d - date.today()).days
 
-# ========= Helpers =========
-def _month_key(d: date) -> str:
-    return d.strftime("%Y-%m")
-
-
-def _prev_month_key() -> str:
-    first = date.today().replace(day=1)
-    prev_last = first - timedelta(days=1)
-    return prev_last.strftime("%Y-%m")
-
-
-def _days_left(iso: str) -> int:
+def _parse_date(x: Any) -> date:
+    if isinstance(x, date):
+        return x
     try:
-        return (date.fromisoformat(iso) - date.today()).days
+        return datetime.fromisoformat(str(x)).date()
     except Exception:
-        return 9999  # if bad data, treat as far away
+        # Try common YYYY-MM-DD
+        try:
+            return datetime.strptime(str(x), "%Y-%m-%d").date()
+        except Exception:
+            return date.today()
 
+def _badge(text: str, bg="#243042", fg="#cfe3ff") -> str:
+    return (
+        "<span style='padding:2px 8px;border-radius:10px;"
+        f"background:{bg};color:{fg};font-size:12px'>{text}</span>"
+    )
 
-def _get_inventory(user_id: int):
-    conn = db.get_connection()
-    c = conn.cursor()
+def _risk_tag(d: date) -> str:
+    left = _days_left(d)
+    if left < 0:
+        return _badge("expired", "#3b0a0a", "#ffd1d1")
+    if left == 0:
+        return _badge("today", "#5b1a1a", "#ffd1d1")
+    if left <= 2:
+        return _badge("very soon", "#5b3a1a", "#ffe7c2")
+    if left <= 7:
+        return _badge("this week", "#1e293b", "#cfe3ff")
+    return _badge(f"in {left}d", "#111827", "#e5e7eb")
+
+# --------------------------------------------------------------------------------
+# Banner handling
+# --------------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def _load_banner_bytes(path: Path) -> Optional[bytes]:
+    try:
+        return path.read_bytes()
+    except Exception:
+        return None
+
+def _banner_for_now() -> Path:
+    hr = datetime.now().hour
+    # 5-11 morning, 11-17 afternoon, 17-21 evening, else night
+    if 5 <= hr < 11:
+        return ASSETS_DIR / "banner_morning.png"
+    if 11 <= hr < 17:
+        return ASSETS_DIR / "banner_afternoon.png"
+    if 17 <= hr < 21:
+        return ASSETS_DIR / "banner_evening.png"
+    return ASSETS_DIR / "banner_night.png"
+
+def _render_time_banner(user_name: str) -> None:
+    p = _banner_for_now()
+    data = _load_banner_bytes(p)
+    if data:
+        st.markdown(
+            """
+            <style>
+              .hero-img img { border-radius: 18px; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.container():
+            st.markdown("<div class='hero-img'>", unsafe_allow_html=True)
+            st.image(data, use_container_width=True, caption=f"Welcome, {user_name}")
+            st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        # If no asset found, fall back to a simple title
+        st.title("🏠 Home")
+
+# --------------------------------------------------------------------------------
+# User resolution
+# --------------------------------------------------------------------------------
+def _resolve_user() -> Optional[Dict[str, Any]]:
+    try:
+        if hasattr(db, "get_current_user"):
+            u = db.get_current_user()
+            if isinstance(u, dict) and (u.get("id") or u.get("user_id")):
+                return {
+                    "id": int(u.get("id") or u.get("user_id")),
+                    "name": u.get("name") or u.get("user_name") or u.get("phone") or "User",
+                }
+    except Exception:
+        pass
+    if "user_id" in st.session_state:
+        return {
+            "id": int(st.session_state["user_id"]),
+            "name": st.session_state.get("user_name") or st.session_state.get("name") or st.session_state.get("phone") or "User",
+        }
+    return None
+
+# --------------------------------------------------------------------------------
+# Data access
+# --------------------------------------------------------------------------------
+def _inventory_rows(user_id: int) -> List[tuple]:
+    """
+    Returns rows: (id, name, expiration, type, qty, unit)
+    """
+    conn = db.get_connection(); c = conn.cursor()
     c.execute(
         """
         SELECT
           id,
-          name,
-          expiration,
+          COALESCE(name,'') as name,
+          COALESCE(expiration, date('now')) as expiration,
           COALESCE(type,'Other') as type,
-          COALESCE(storage_state,'fresh') as storage_state,
           COALESCE(base_amount, amount, 0) as qty,
-          COALESCE(base_unit, unit, 'pcs') as unit,
-          COALESCE(price_per_base, 0.0) as ppb,
-          COALESCE(money_lost, 0.0) as money_lost
+          COALESCE(base_unit, unit, 'pcs') as unit
         FROM inventory
-        WHERE user_id = ?
-        ORDER BY date(expiration) ASC, name ASC
+        WHERE user_id=?
         """,
         (user_id,),
     )
     rows = c.fetchall()
     conn.close()
-    # rows: (id, name, expiration, type, state, qty, unit, ppb, money_lost)
     return rows
 
-
-def _risk_buckets(rows):
-    today_ = date.today()
-    overdue = 0
-    soon = 0
-    week = 0
-    later = 0
-    frozen = 0
-
-    for _, _, exp, _, state, *_ in rows:
-        if (state or "fresh") == "frozen":
-            frozen += 1
-            continue
-        try:
-            dd = (date.fromisoformat(exp) - today_).days if exp else 9999
-        except Exception:
-            dd = 9999
-        if dd < 0:
-            overdue += 1
-        elif dd <= RISK_SOON_DAYS:
-            soon += 1
-        elif dd <= RISK_WEEK_DAYS:
-            week += 1
-        else:
-            later += 1
-    return overdue, soon, week, later, frozen
-
-
-def _top_categories(rows, top_n=3):
-    counts = {}
-    for _, _, _, typ, _, *_ in rows:
-        counts[typ] = counts.get(typ, 0) + 1
-    ranked = sorted(counts.items(), key=lambda x: x[1], reverse=True)
-    total = sum(counts.values()) or 1
-    return [(k, v, v / total) for k, v in ranked[:top_n]]
-
-
-def _ai_tips(user_name: str, urgent_names_dates):
-    if not _AI_OK:
-        return {
-            "waste_tip": "Scan fridge weekly; rotate older items forward.",
-            "storage_tip": "Keep herbs in jars with a little water.",
-            "meal_idea": "Make a quick fried rice with leftovers.",
-        }
-    item_list = ", ".join([f"{n} ({d})" for n, d in urgent_names_dates]) or "no urgent items"
-    prompt = (
-        f"You are a concise kitchen coach for {user_name}. "
-        f"Urgent items: {item_list}. "
-        "Give one 12-20 word tip each: 1) waste reduction, 2) storage, 3) meal idea using at least one urgent item. "
-        "Return three lines only."
-    )
+def _recent_activity(user_id: int, limit: int = 5) -> List[Tuple[str, str, float, str]]:
+    """
+    Returns recent rows: (ts_iso, event_type, qty, name)
+    """
+    conn = db.get_connection(); c = conn.cursor()
     try:
-        # Backward compatible call; will fail gracefully if not configured
-        res = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": prompt}],
-            max_tokens=120,
+        c.execute(
+            """
+            SELECT u.ts, u.event_type, u.step_count, i.name
+              FROM usage_log u
+              JOIN inventory i ON i.id = u.item_id
+             WHERE u.user_id=?
+             ORDER BY u.ts DESC
+             LIMIT ?
+            """,
+            (user_id, limit),
         )
-        text = res.choices[0].message["content"].strip()
-        parts = [p.strip("-• ").strip() for p in text.splitlines() if p.strip()]
-        return {
-            "waste_tip": parts[0] if len(parts) > 0 else "Track expiry dates weekly.",
-            "storage_tip": parts[1] if len(parts) > 1 else "Use airtight containers for leftovers.",
-            "meal_idea": parts[2] if len(parts) > 2 else "Pasta toss with nearing veggies.",
-        }
+        rows = c.fetchall()
     except Exception:
-        return {
-            "waste_tip": "Track expiry dates weekly.",
-            "storage_tip": "Use airtight containers for leftovers.",
-            "meal_idea": "Pasta toss with nearing veggies.",
-        }
+        rows = []
+    finally:
+        conn.close()
+    out: List[Tuple[str, str, float, str]] = []
+    for ts, ev, qty, nm in rows or []:
+        t = str(ts)[:19]
+        ev = (ev or "").lower()
+        try:
+            q = float(qty or 0.0)
+        except Exception:
+            q = 0.0
+        out.append((t, ev, q, nm or ""))
+    return out
 
+def _coach_counts(user_id: int) -> Tuple[List[dict], List[dict]]:
+    """
+    Returns (critical_list, urgent_list)
+    critical_list: items expiring today/expired
+    urgent_list: items expiring in 1–3 days
+    Fallback to empty lists if core missing.
+    """
+    try:
+        import smartcoach_core as core
+        crit = core.get_critical_warnings(user_id)
+        today_expired = (crit.get("expired", []) or []) + (crit.get("today", []) or [])
+        urgent = core.get_urgent_risks(user_id, window_days=3, limit=50) or []
+        return today_expired, urgent
+    except Exception:
+        return [], []
 
-# ========= MAIN VIEW =========
-def calendar_view():
-    if "user_id" not in st.session_state:
-        st.warning("Please log in first.")
+# --------------------------------------------------------------------------------
+# Minimal sections
+# --------------------------------------------------------------------------------
+def _render_header(user_name: str) -> None:
+    # Banner first; if banner is missing, title is shown in _render_time_banner
+    _render_time_banner(user_name)
+    # Subtle date line
+    st.caption(f"Today is {date.today():%A, %d %B %Y}.")
+
+def _render_notifications(user_id: int) -> None:
+    st.subheader("🔔 Notifications")
+    critical, urgent = _coach_counts(user_id)
+
+    if not critical and not urgent:
+        st.success("All clear. Nothing urgent right now.")
         return
 
-    user_id = st.session_state["user_id"]
-    user_name = st.session_state.get("name", "User")
+    cols = st.columns(2)
+    with cols[0]:
+        st.markdown("**Today**")
+        if not critical:
+            st.caption("No items expiring today.")
+        else:
+            for r in critical[:5]:
+                name = r.get("name") or "item"
+                typ = r.get("type") or ""
+                st.markdown(f"- **{name}** · *{typ}* {_badge('today', '#5b1a1a', '#ffd1d1')}", unsafe_allow_html=True)
+            if len(critical) > 5:
+                st.caption(f"…and {len(critical)-5} more today.")
 
-    # Data
-    rows = _get_inventory(user_id)
-    total_items = len(rows)
+    with cols[1]:
+        st.markdown("**Soon (1–3 days)**")
+        if not urgent:
+            st.caption("No near-term risks.")
+        else:
+            for r in urgent[:5]:
+                name = r.get("name") or "item"
+                days = r.get("days")
+                when = f"in {int(days)}d" if isinstance(days, (int, float)) and days >= 0 else "soon"
+                st.markdown(f"- **{name}** · {_badge(when, '#5b3a1a', '#ffe7c2')}", unsafe_allow_html=True)
+            if len(urgent) > 5:
+                st.caption(f"…and {len(urgent)-5} more in 1–3 days.")
 
-    # KPI summaries (this month and delta vs last month)
-    now_key = _month_key(date.today())
-    prev_key = _prev_month_key()
-    cur = db.get_monthly_summary(user_id, month_key=now_key)
-    prev = db.get_monthly_summary(user_id, month_key=prev_key)
+    st.caption("Open the Coach page for actions like freeze, use, or recipe rescue.")
 
-    used_delta = cur["used_steps"] - prev["used_steps"]
-    exp_delta = cur["expired_steps"] - prev["expired_steps"]
-    money_delta = round(cur["money_lost"] - prev["money_lost"], 2)
-
-    overdue, soon, week, later, frozen = _risk_buckets(rows)
-
-    # Upcoming list (info-only)
-    today_ = date.today()
-    upcoming = []
-    for _id, name, exp, typ, state, *_ in rows:
-        if not exp:
+def _render_upcoming_week(rows: List[tuple]) -> None:
+    st.subheader("⏳ Expiring this week")
+    today = date.today(); horizon = today + timedelta(days=7)
+    upcoming: List[Tuple[str, date, str]] = []
+    for _, name, exp, typ, qty, unit in rows:
+        try:
+            if float(qty or 0) <= 0:
+                continue
+        except Exception:
             continue
-        d = date.fromisoformat(exp)
-        if state != "frozen" and d <= today_ + timedelta(days=RISK_WEEK_DAYS):
-            upcoming.append((name, exp, typ, state, _days_left(exp)))
-    upcoming = sorted(upcoming, key=lambda t: t[4])[:MAX_UPCOMING_ITEMS]
+        d = _parse_date(exp)
+        if today <= d <= horizon:
+            upcoming.append((name, d, typ))
+    if not upcoming:
+        st.caption("Nothing expiring in the next 7 days.")
+        return
+    upcoming.sort(key=lambda t: (t[1], t[0]))
+    for name, d, typ in upcoming[:5]:
+        st.markdown(f"- **{name}** · *{typ}* · {d.isoformat()} &nbsp; {_risk_tag(d)}", unsafe_allow_html=True)
+    extra = max(0, len(upcoming) - 5)
+    if extra:
+        st.caption(f"…and {extra} more this week.")
 
-    # AI tips
-    ai_tips = _ai_tips(user_name, [(n, e) for n, e, *_ in upcoming])
+def _render_activity(user_id: int) -> None:
+    st.subheader("🗂 Recent activity")
+    rows = _recent_activity(user_id, limit=5)
+    if not rows:
+        st.caption("No recent activity yet.")
+        return
+    for ts, ev, qty, nm in rows:
+        emoji = "✅" if ev == "used" else ("⛔" if ev == "expired" else "•")
+        qty_txt = f"{qty:g}".rstrip(".")
+        st.write(f"{emoji} {ts} — **{nm}** · {ev} · {qty_txt}")
 
-    # ======= Layout =======
-    st.markdown(f"## 👋 Welcome back, {user_name}")
-    st.caption("A quick snapshot of your kitchen. No clicks, just clarity.")
+def _render_quick_links() -> None:
+    st.subheader("🔗 Quick links")
+    cols = st.columns(4)
+    cols[0].markdown("**📦 Stock**  \nOpen your inventory.")
+    cols[1].markdown("**🛒 Shopping**  \nReview store carts.")
+    cols[2].markdown("**🧠 Coach**  \nHandle at-risk items.")
+    cols[3].markdown("**📊 Stats**  \nSee the dashboard.")
 
-    # Tips row
-    c1, c2, c3 = st.columns(3)
-    c1.info(f"💡 Waste tip: {ai_tips['waste_tip']}")
-    c2.success(f"📦 Storage tip: {ai_tips['storage_tip']}")
-    c3.warning(f"🍽 Meal idea: {ai_tips['meal_idea']}")
-
-    # KPI cards (with deltas vs last month)
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("📦 Items", total_items)
-    k2.metric("✅ Used (mo)", cur["used_steps"], delta=f"{used_delta:+}")
-    k3.metric("⛔ Expired (mo)", cur["expired_steps"], delta=f"{exp_delta:+}")
-    k4.metric("💰 Money lost (mo)", f"₪{cur['money_lost']:.2f}", delta=f"{money_delta:+.2f}")
-
-    # Risk overview
-    st.markdown("### 🧭 Freshness overview")
-    r1, r2, r3, r4, r5 = st.columns(5)
-    r1.error(f"Overdue: {overdue}")
-    r2.warning(f"0–{RISK_SOON_DAYS} days: {soon}")
-    r3.info(f"{RISK_SOON_DAYS+1}–{RISK_WEEK_DAYS} days: {week}")
-    r4.write(f"Later: {later}")
-    r5.write(f"❄️ Frozen: {frozen}")
-
-    # Top categories
-    st.markdown("### 🏷 Top categories")
-    topcats = _top_categories(rows)
-    if topcats:
-        for name, count, ratio in topcats:
-            st.progress(min(max(ratio, 0.0), 1.0), text=f"{name}: {count}")
-    else:
-        st.caption("No categories yet.")
-
-    # Upcoming (info only)
-    st.markdown("### ⏳ Expiring within 7 days")
-    if upcoming:
-        for name, exp, typ, state, left in upcoming:
-            icon = "❄️ " if state == "frozen" else ("⚠️ " if left <= RISK_SOON_DAYS else "⏳ ")
-            cols = st.columns([3, 2, 2, 1])
-            cols[0].markdown(f"**{name}**  ·  _{typ}_")
-            cols[1].markdown(f"📅 {exp}")
-            cols[2].markdown("Frozen" if state == "frozen" else f"{left} day(s) left")
-            cols[3].markdown(" ")  # spacer to keep layout tidy
-    else:
-        st.info("Nothing urgent this week. Nicely done.")
-
-    # Compact calendar
-    st.markdown("### 📅 Your week at a glance")
-    events = []
-    for _id, name, exp, typ, state, *_ in rows:
-        if not exp:
-            continue
-        color = "#33BFFF" if state == "frozen" else ("#ff6b6b" if _days_left(exp) <= RISK_SOON_DAYS else "#1dd1a1")
-        events.append({
-            "title": f"{name} ({typ})" + (" • Frozen" if state == "frozen" else ""),
-            "start": exp,
-            "end": exp,
-            "color": color,
+def _render_calendar(rows: List[tuple]) -> None:
+    with st.expander("🗓 Week calendar"):
+        if _calendar is None:
+            st.info("Calendar widget unavailable. Install `streamlit-calendar` to enable the week view.")
+            return
+        events = []
+        for _, name, exp, typ, qty, unit in rows:
+            try:
+                if float(qty or 0) <= 0:
+                    continue
+            except Exception:
+                continue
+            d = _parse_date(exp)
+            events.append({"title": f"{name} ({typ})", "start": d.isoformat(), "end": d.isoformat(), "allDay": True})
+        _calendar(options={
+            "initialView": "dayGridWeek",
+            "height": 420,
+            "events": events,
+            "headerToolbar": {"left": "", "center": "", "right": ""},
+            "dayMaxEvents": True,
         })
 
-    calendar(
-        events=events,
-        options={
-            "initialView": "listWeek",
-            "height": CALENDAR_HEIGHT,
-            "headerToolbar": {"left": "", "center": "title", "right": ""},
-        },
-    )
+# --------------------------------------------------------------------------------
+# Entry point
+# --------------------------------------------------------------------------------
+def calendar_view() -> None:
+    user = _resolve_user()
+    if not user:
+        st.info("Please log in to see your homepage.")
+        return
 
-    # Gentle footer
-    st.caption("Stats reset monthly. Money lost and step counts come from your usage log.")
+    user_id = int(user["id"])
+    user_name = user.get("name") or "User"
+    rows = _inventory_rows(user_id)
 
+    # Header + banner
+    _render_header(user_name)
 
-# For Streamlit multi-page setups:
+    # Essentials
+    _render_notifications(user_id)
+    st.divider()
+    _render_upcoming_week(rows)
+    st.divider()
+    _render_activity(user_id)
+    st.divider()
+    _render_quick_links()
+    _render_calendar(rows)
+
+# Compatibility aliases
+def render():
+    calendar_view()
+
 def app():
+    calendar_view()
+
+if __name__ == "__main__":
     calendar_view()

@@ -1,260 +1,210 @@
-# SmartCoach.py — R10: schema-safe, bounded risk, frozen_until, real buckets, debug
-import math
-from datetime import datetime, date, timedelta
-from typing import Dict, List, Tuple, Optional
+# SmartCoach.py
+# Streamlit UI for SmartCoach (advisor mode).
+# Renders: Critical warnings (today/expired), Urgent risks (next 1–3 days),
+# Recipe Rescue, Preventive moves (4–7 days), Quick tips.
+#
+# All logic lives in smartcoach_core.py.
 
+from __future__ import annotations
+
+from typing import Optional
+import sys as _sys
 import streamlit as st
-from db import get_connection, use_one_step, expire_all, get_monthly_summary
+
+import smartcoach_core as core
+
+# Router compatibility: play nice with weird dynamic loaders
+_mod = _sys.modules.get(__name__)
+if _mod is not None:
+    _sys.modules.setdefault("SmartCoach", _mod)
+    _sys.modules.setdefault("smartcoach", _mod)
+
 
 # -----------------------------
-# Helpers
+# Small helpers
 # -----------------------------
-def _today_ym() -> str:
-    return date.today().strftime("%Y-%m")
+def _step_for(base_unit: str) -> float:
+    return 100.0 if base_unit in ("g", "ml") else 1.0
 
-def _parse_date(s: Optional[str]) -> Optional[date]:
-    if not s: return None
-    s = str(s).strip()
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y"):
-        try: return datetime.strptime(s, fmt).date()
-        except Exception: pass
-    return None
+def _qty_input(label: str, key: str, default: float, base_unit: str):
+    step = _step_for(base_unit)
+    return st.number_input(label, min_value=0.0, step=step, value=float(default or 0.0), key=key)
 
-def _effective_expiry(exp_str: str, frozen_until: Optional[str]) -> date:
-    base = _parse_date(exp_str) or (date.today() + timedelta(days=3650))
-    if frozen_until:
-        fu = _parse_date(frozen_until)
-        if fu and fu > base: return fu
-    return base
+def _action_row_prefix(name: str, typ: str, base_unit: str, on_hand: float,
+                       expiry: Optional[str], days: Optional[int]):
+    details = f"[{typ} · {base_unit}] · on hand: {on_hand:g}"
+    if expiry:
+        if days is None:
+            when = f"expiry: {expiry}"
+        elif days < 0:
+            when = f"expired {-days}d ago"
+        elif days == 0:
+            when = "expires today"
+        else:
+            when = f"expires in {days}d"
+        details += f" · {when}"
+    st.markdown(f"**{name}**  \n{details}")
 
-def _days_left_pair(exp_str: str, frozen_until: Optional[str]) -> int:
-    return (_effective_expiry(exp_str, frozen_until) - date.today()).days
+def _success_and_rerun(msg: str):
+    st.success(msg)
+    st.rerun()
 
-def _steps_left(amount: float, unit: Optional[str]) -> float:
-    u = (unit or "pcs").lower()
-    amt = float(amount or 0.0)
-    if u in ("pcs", "pc", "piece"): return amt
-    if u in ("g", "ml"): return amt / 100.0
-    if u in ("kg", "l", "lt", "liter", "litre"): return amt / 0.1
-    return amt
-
-def _daily_rate(used_steps_this_month: int) -> float:
-    day = max(1, date.today().day)
-    real = (used_steps_this_month or 0) / day
-    return real if real > 0 else 0.5  # gentle floor to avoid infinity
-
-def _value_nis(amount: float, ppu: float) -> float:
-    return round((ppu or 0.0) * (amount or 0.0), 2)
-
-def _risk_score(days_left: int, steps_left: float, daily_rate: float, value_nis: float, perishability: int) -> int:
-    # Time urgency 0..1
-    urgency = max(0.0, min(1.0, (14.0 - days_left) / 14.0))  # <=0 => 1.0
-    # Demand pressure (stock weeks vs rate)
-    rate = max(daily_rate, 0.1)
-    stock_weeks = (steps_left / rate) / 7.0 if steps_left > 0 else 0.0
-    demand = max(0.0, min(1.0, 1.0 - min(stock_weeks, 1.0)))
-    # Money influence
-    value = max(0.0, min(1.0, math.log1p(max(value_nis, 0.0)) / 5.0))
-    perish_w = {1: 0.30, 2: 0.65, 3: 1.00}.get(int(perishability or 2), 0.65)
-    score = 100 * (0.55 * urgency + 0.25 * demand + 0.20 * value * perish_w)
-    return int(round(max(0.0, min(100.0, score))))
-
-# -----------------------------
-# DB access
-# -----------------------------
-def get_user_items(user_id: int):
-    """
-    Defensive SELECT with frozen_until/perishability included.
-    Ordered by effective expiry.
-    """
-    conn = get_connection(); c = conn.cursor()
-    c.execute("""
-        SELECT
-            id,                -- 0
-            name,              -- 1
-            expiration,        -- 2
-            COALESCE(type,''), -- 3
-            COALESCE(amount,0),-- 4
-            COALESCE(unit,'pcs'), -- 5
-            COALESCE(used_count,0), -- 6
-            COALESCE(last_used_month,''), -- 7
-            COALESCE(stable,0), -- 8
-            COALESCE(price_per_unit,0.0), -- 9
-            COALESCE(expired_count,0), -- 10
-            COALESCE(money_lost,0.0),  -- 11
-            frozen_until,      -- 12
-            COALESCE(perishability,2)  -- 13
-        FROM inventory
-        WHERE user_id=?
-        ORDER BY date(COALESCE(frozen_until, expiration)) ASC, name ASC
-    """, (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def freeze_item(item_id: int, days: int = 30, label: str = "Frozen"):
-    """Set frozen_until without touching real expiration."""
-    conn = get_connection(); c = conn.cursor()
-    c.execute("SELECT expiration, COALESCE(type,'') FROM inventory WHERE id=?", (item_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close(); raise ValueError("Item not found")
-    exp_str, typ = row
-    base = _parse_date(exp_str) or date.today()
-    new_until = (base + timedelta(days=days)).strftime("%Y-%m-%d")
-    new_type = typ if (typ and label in typ) else (f"{typ} • {label}" if typ else label)
-    c.execute("UPDATE inventory SET frozen_until=?, type=? WHERE id=?", (new_until, new_type, item_id))
-    conn.commit(); conn.close()
-    return new_until, new_type
 
 # -----------------------------
 # UI
 # -----------------------------
-def coach():
-    st.title("🧠 Smart Coach")
-    st.caption("SmartCoach R10 • schema-safe • risk=v2 • frozen_until enabled")
+def smartcoach():
+    st.title("🧠 SmartCoach — Waste Minimizer")
 
     if "user_id" not in st.session_state:
-        st.warning("Login first."); st.stop()
+        st.warning("Please login first")
+        st.stop()
     user_id = int(st.session_state["user_id"])
 
-    rows = get_user_items(user_id)
-    if not rows:
-        st.info("Nothing to analyze. Add items in Inventory."); return
+    snap = core.coach_snapshot(user_id)
 
-    # KPIs
-    def _value_at_risk(horizon_days: int) -> float:
-        total = 0.0
-        for r in rows:
-            amount, ppu, exp, fu = r[4], r[9], r[2], r[12]
-            if _days_left_pair(exp, fu) <= horizon_days:
-                total += (ppu or 0.0) * (amount or 0.0)
-        return round(total, 2)
+    # ---------------- Critical warnings ----------------
+    critical = snap.get("critical", {})
+    expired_rows = critical.get("expired", []) or []
+    today_rows = critical.get("today", []) or []
 
-    var3, var7, var14 = _value_at_risk(3), _value_at_risk(7), _value_at_risk(14)
-    lost_total = round(sum((r[11] or 0.0) for r in rows), 2)
+    if expired_rows or today_rows:
+        with st.container():
+            if today_rows:
+                st.error(f"⚠️ {len(today_rows)} item(s) expire **TODAY** — use or discard immediately.")
+                for r in today_rows:
+                    c1, c2, c3, c4 = st.columns([2.6, 1.2, 1.2, 1.2])
+                    with c1:
+                        _action_row_prefix(r["name"], r["type"], r["base_unit"], r["on_hand"], r["expiry"], r["days"])
+                    use_qty = c2.number_input("Use qty", min_value=0.0, step=_step_for(r["base_unit"]),
+                                              value=float(r["on_hand"]), key=f"crt_use_{r['item_id']}")
+                    if c3.button("Use now", key=f"crt_use_btn_{r['item_id']}"):
+                        ok, msg = core.mark_used_now(user_id, r["item_id"], use_qty)
+                        _success_and_rerun(msg if ok else f"Use failed: {msg}")
+                    throw_qty = c4.number_input("Throw qty", min_value=0.0, step=_step_for(r["base_unit"]),
+                                                value=0.0, key=f"crt_thr_{r['item_id']}")
+                    if c4.button("Throw", key=f"crt_thr_btn_{r['item_id']}"):
+                        ok, msg = core.mark_thrown_now(user_id, r["item_id"], throw_qty or r["on_hand"])
+                        _success_and_rerun(msg if ok else f"Discard failed: {msg}")
+                st.divider()
 
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Items", len(rows))
-    k2.metric("Value at Risk (3d)", f"₪{var3}")
-    k3.metric("Value at Risk (7d)", f"₪{var7}")
-    k4.metric("Value at Risk (14d)", f"₪{var14}")
-    k5.metric("Money Lost (all-time)", f"₪{lost_total}")
+            if expired_rows:
+                st.error(f"🧪 {len(expired_rows)} item(s) already **EXPIRED** — discard for safety.")
+                for r in expired_rows:
+                    c1, c2, c3 = st.columns([2.6, 1.2, 1.2])
+                    with c1:
+                        _action_row_prefix(r["name"], r["type"], r["base_unit"], r["on_hand"], r["expiry"], r["days"])
+                    thr_qty = c2.number_input("Throw qty", min_value=0.0, step=_step_for(r["base_unit"]),
+                                              value=float(r["on_hand"]), key=f"exp_thr_{r['item_id']}")
+                    if c3.button("Throw now", key=f"exp_thr_btn_{r['item_id']}"):
+                        ok, msg = core.mark_thrown_now(user_id, r["item_id"], thr_qty)
+                        _success_and_rerun(msg if ok else f"Discard failed: {msg}")
+                st.divider()
 
-    # Build plan
-    plan: Dict[str, List[Tuple]] = {"cook_today": [], "cook_48h": [], "freeze_now": [], "safe": []}
-    cards: List[Tuple] = []
+    # ---------------- Urgent risks ----------------
+    urgent = snap.get("urgent", []) or []
+    st.subheader("⏱️ Urgent risks (next 1–3 days)")
+    if not urgent:
+        st.caption("No urgent risks. Breathe.")
+    else:
+        for r in urgent:
+            c1, c2, c3, c4, c5 = st.columns([2.8, 1.1, 1.1, 1.2, 1.2])
+            with c1:
+                _action_row_prefix(r["name"], r["type"], r["base_unit"], r["on_hand"], r["expiry"], r["days"])
+                st.caption(f"Recommendation: **{r['action']}** — {r['reason']}")
+            qty = c2.number_input("Qty", min_value=0.0, step=_step_for(r["base_unit"]),
+                                  value=float(r["on_hand"]), key=f"urg_qty_{r['item_id']}")
+            if r["action"] == "freeze":
+                extra = c3.number_input("+days", min_value=1, step=7,
+                                        value=int(core.DEFAULT_FREEZE_EXT_DAYS),
+                                        key=f"urg_frz_days_{r['item_id']}")
+                if c4.button("Freeze", key=f"urg_frz_btn_{r['item_id']}"):
+                    ok, msg = core.apply_freeze(user_id, r["item_id"], qty, extra_days=int(extra))
+                    _success_and_rerun(msg if ok else f"Freeze failed: {msg}")
+                if c5.button("Dismiss", key=f"urg_dismiss_{r['item_id']}"):
+                    core.dismiss_item(user_id, r["item_id"], note="urgent-dismiss")
+                    _success_and_rerun("Dismissed")
+            elif r["action"] == "cook" or r["action"] == "use":
+                if c3.button("Use now", key=f"urg_use_btn_{r['item_id']}"):
+                    ok, msg = core.mark_used_now(user_id, r["item_id"], qty)
+                    _success_and_rerun(msg if ok else f"Use failed: {msg}")
+                if c4.button("Freeze", key=f"urg_frz_btn2_{r['item_id']}"):
+                    ok, msg = core.apply_freeze(user_id, r["item_id"], qty, extra_days=int(core.DEFAULT_FREEZE_EXT_DAYS))
+                    _success_and_rerun(msg if ok else f"Freeze failed: {msg}")
+                if c5.button("Dismiss", key=f"urg_dismiss2_{r['item_id']}"):
+                    core.dismiss_item(user_id, r["item_id"], note="urgent-dismiss")
+                    _success_and_rerun("Dismissed")
 
-    for r in rows:
-        (item_id, name, exp, typ, amount, unit, used_count, last_m, stable,
-         ppu, _, _, frozen_until, perishability) = r
+    st.divider()
 
-        dl = _days_left_pair(exp, frozen_until)
-        steps = _steps_left(amount, unit)
-        rate = _daily_rate(used_count if last_m == _today_ym() else 0)
-        value = _value_nis(amount, ppu)
-        score = _risk_score(dl, steps, rate, value, perishability)
+    # ---------------- Recipe rescue ----------------
+    recipes = snap.get("recipes", []) or []
+    st.subheader("🍳 Recipe rescue (uses at-risk items)")
+    if not recipes:
+        st.caption("No matching recipes for the urgent items.")
+    else:
+        for rec in recipes:
+            cols = st.columns([3, 2, 1])
+            cols[0].markdown(f"**{rec['title']}**")
+            hits = ", ".join(rec.get("hit_items", []))
+            cols[1].write(f"Uses: {hits}  · Missing: {rec.get('missing_count', 0)}")
+            if rec.get("url"):
+                cols[2].markdown(f"[Open recipe]({rec['url']})")
+            else:
+                cols[2].write("")
 
-        card = (score, item_id, name, exp, typ, amount, unit, used_count, last_m,
-                stable, ppu, dl, frozen_until, perishability, value)
-        cards.append(card)
+    st.divider()
 
-        if dl <= 1 or score >= 85:
-            plan["cook_today"].append(card)
-        elif 2 <= dl <= 3 or 70 <= score < 85:
-            plan["cook_48h"].append(card)
-        elif (perishability == 3 and dl <= 3) or (score >= 80 and value > 0):
-            plan["freeze_now"].append(card)
-        else:
-            plan["safe"].append(card)
+    # ---------------- Preventive moves ----------------
+    preventive = snap.get("preventive", []) or []
+    st.subheader("🧯 Preventive moves (4–7 days)")
+    if not preventive:
+        st.caption("Nothing to plan right now.")
+    else:
+        for r in preventive:
+            c1, c2, c3 = st.columns([2.8, 1.2, 1.2])
+            with c1:
+                _action_row_prefix(r["name"], r["type"], r["base_unit"], r["on_hand"], r["expiry"], r["days"])
+                st.caption(f"{r['plan']}")
+            if r.get("suggestion") == "freeze":
+                fqty = float(r.get("freeze_qty_base", 0.0)) or min(r["on_hand"], max(1.0, r["on_hand"] * 0.5))
+                fextra = int(r.get("freeze_extra_days", core.DEFAULT_FREEZE_EXT_DAYS))
+                qty = c2.number_input("Freeze qty", min_value=0.0, step=_step_for(r["base_unit"]),
+                                      value=float(fqty), key=f"prev_frz_qty_{r['item_id']}")
+                extra = c3.number_input("+days", min_value=1, step=7,
+                                        value=int(fextra), key=f"prev_frz_days_{r['item_id']}")
+                if c3.button("Freeze now", key=f"prev_frz_btn_{r['item_id']}"):
+                    ok, msg = core.apply_freeze(user_id, r["item_id"], qty, extra_days=int(extra))
+                    _success_and_rerun(msg if ok else f"Freeze failed: {msg}")
+            else:
+                uqty = float(r.get("use_qty_base", 0.0)) or min(r["on_hand"], max(1.0, r["on_hand"] * 0.5))
+                qty = c2.number_input("Use qty", min_value=0.0, step=_step_for(r["base_unit"]),
+                                      value=float(uqty), key=f"prev_use_qty_{r['item_id']}")
+                if c3.button("Use now", key=f"prev_use_btn_{r['item_id']}"):
+                    ok, msg = core.mark_used_now(user_id, r["item_id"], qty)
+                    _success_and_rerun(msg if ok else f"Use failed: {msg}")
 
-    for k in plan:
-        plan[k].sort(key=lambda x: (-x[0], x[12], x[2]))  # risk desc, earliest effective expiry, name
+    st.divider()
 
-    st.subheader("Plan")
-    cA, cB, cC, cD = st.columns(4)
-    cA.metric("Cook today", len(plan["cook_today"]))
-    cB.metric("Cook in 48h", len(plan["cook_48h"]))
-    cC.metric("Freeze now", len(plan["freeze_now"]))
-    cD.metric("Safe", len(plan["safe"]))
+    # ---------------- Quick tips ----------------
+    tips = snap.get("tips", []) or []
+    st.subheader("💡 Quick tips")
+    if not tips:
+        st.caption("No tips right now.")
+    else:
+        for t in tips:
+            st.write(f"• {t}")
 
-    # Batch actions
-    b1, b2 = st.columns(2)
-    if b1.button("✅ Use 1 step for all 'Cook today'"):
-        for score, item_id, *_ in plan["cook_today"]:
-            try: use_one_step(item_id)
-            except Exception as e: st.error(f"id {item_id}: {e}")
-        st.rerun()
 
-    if b2.button("🧊 Freeze all 'Freeze now' (+30d)"):
-        for score, item_id, *_ in plan["freeze_now"]:
-            try: freeze_item(item_id, 30)
-            except Exception as e: st.error(f"id {item_id}: {e}")
-        st.rerun()
+# Entry points for the router
+def coach():
+    smartcoach()
 
-    # DEBUG: show scoring inputs so you can verify reality
-    with st.expander("DEBUG: scoring inputs (first 25)"):
-        import pandas as pd
-        rows_dbg = []
-        for (score, item_id, name, exp, typ, amount, unit, used_count, last_m,
-             stable, ppu, dl, frozen_until, perish, value) in cards[:25]:
-            rate = _daily_rate(used_count if last_m == _today_ym() else 0)
-            steps = _steps_left(amount, unit)
-            urg = max(0.0, min(1.0, (14.0 - dl) / 14.0))
-            rrate = max(rate, 0.1)
-            stock_weeks = (steps / rrate) / 7.0 if steps > 0 else 0.0
-            dem = max(0.0, min(1.0, 1.0 - min(stock_weeks, 1.0)))
-            valc = max(0.0, min(1.0, math.log1p(max(value, 0.0)) / 5.0))
-            rows_dbg.append([
-                item_id, name, exp, frozen_until, dl, steps, round(rate,3),
-                value, perish, round(urg,3), round(dem,3), round(valc,3), score
-            ])
-        df = pd.DataFrame(rows_dbg, columns=[
-            "id","name","exp","frozen_until","days_left","steps","daily_rate","₪value","perish",
-            "urgency","demand","value_comp","score"
-        ])
-        st.dataframe(df, use_container_width=True)
+def app():
+    smartcoach()
 
-    # Lists
-    def badge(score: int) -> str:
-        if score >= 85: return "🟥 High"
-        if score >= 70: return "🟧 Med"
-        if score >= 50: return "🟨 Watch"
-        return "🟩 Low"
+# also expose direct symbol some routers expect
+app = coach
 
-    def bucket_ui(title: str, items: List[Tuple]):
-        st.markdown(f"#### {title}")
-        if not items:
-            st.caption("Nothing here."); return
-        for (score, item_id, name, exp, typ, amount, unit, used_count, last_m,
-             stable, ppu, dl, frozen_until, perish, value) in items:
-            eff = _effective_expiry(exp, frozen_until).strftime("%Y-%m-%d")
-            with st.container(border=True):
-                st.write(
-                    f"**{name}** ({typ or '—'}) • Value: ₪{value:.2f} • Perish: {perish} "
-                    f"| Expires: {eff} | Left: {amount} {unit} | ₪/unit: {ppu or 0}"
-                )
-                st.write(f"Risk: **{score}** {badge(score)} | Days left: {dl} | Used this month: {used_count}")
-                st.progress(min(100, max(0, score)) / 100.0)
-                c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
-                if c1.button("✅ Use 1", key=f"use1_{item_id}"):
-                    try: use_one_step(item_id); st.success("Used 1."); st.rerun()
-                    except Exception as e: st.error(e)
-                if c2.button("🧊 Freeze +30d", key=f"fr_{item_id}"):
-                    try: new_until, _ = freeze_item(item_id, 30); st.info(f"Frozen until {new_until}"); st.rerun()
-                    except Exception as e: st.error(e)
-                if c3.button("☠️ Expire ALL", key=f"exall_{item_id}"):
-                    try: expire_all(item_id); st.error("Expired all."); st.rerun()
-                    except Exception as e: st.error(e)
-                new_p = c4.selectbox("Perish", [1,2,3], index=max(1, min(3, int(perish)))-1, key=f"per_{item_id}")
-                if new_p != perish:
-                    conn = get_connection(); cc = conn.cursor()
-                    cc.execute("UPDATE inventory SET perishability=? WHERE id=?", (int(new_p), item_id))
-                    conn.commit(); conn.close()
-                    st.toast(f"Perishability of {name} set to {new_p}")
-                    st.rerun()
-
-    bucket_ui("Cook today", plan["cook_today"])
-    bucket_ui("Cook in 48 hours", plan["cook_48h"])
-    bucket_ui("Freeze now", plan["freeze_now"])
-    bucket_ui("Safe", plan["safe"])
+if __name__ == "__main__":
+    smartcoach()
