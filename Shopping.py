@@ -41,16 +41,111 @@ def _clear_cart():
 
 
 # -----------------------------
-# UI
+# Guide tab content
 # -----------------------------
-def shopping():
-    st.title("🛒 Shopping")
+def _render_guide():
+    st.markdown(
+        """
+# 🛒 Shopping — Guide
 
-    if "user_id" not in st.session_state:
-        st.warning("Please login first")
-        st.stop()
-    user_id = int(st.session_state["user_id"])
+This page helps you restock efficiently, compare store prices, and keep a running budget.
 
+---
+
+## 1) Monthly budget & spend
+- Set **Monthly budget (₪)** at the top.
+- The app shows **Spent this month** and how much is **Remaining**.
+
+---
+
+## 2) One-time importer (Israeli chains + staples)
+- Use **Import defaults** to create common stores, normalize staple names, and seed baseline prices.
+- Safe to run more than once; it upserts.
+
+---
+
+## 3) Shop by store (browse & add)
+- Choose a **store**, optionally **search** by name and **filter by type** (e.g., Dairy, Produce).
+- Each line shows:
+  - Pack size, pack price, and computed **₪/base** (e.g., ₪/g or ₪/ml).
+  - Optional **product link** (opens the store’s site/product page).
+  - **packs**: how many packs to buy; **expiry**: auto suggestion you can edit.
+  - **Add** adds that line straight to the **Cart**.
+  - Check multiple lines and click **Add selected → Cart** to batch add.
+
+**Add a NEW item to this store**
+- Fill: name, type, base unit, pack qty/unit/price, product link (optional).
+- **Save price to this store** updates the price book.
+- **Save + add packs → Cart** also adds stock to your cart.
+
+---
+
+## 4) Stores & what they sell
+- Add / update stores (name, kind, city/area, website link, notes).
+- Assign **categories** each store sells (used by suggestions and filters).
+- You can **Delete** a store.
+
+---
+
+## 5) Price book (₪/base) + add to cart
+- Pick an **Inventory item** and a **Store**, then set **pack qty/unit/price**.
+- Click **Save price** to upsert the store’s price for that item.
+- Set **Add packs** and click **Add packs → Cart** to buy immediately.
+- Below, see **all prices** in the selected store; you can also add from there.
+
+---
+
+## 6) Cheapest store finder (per item)
+- Pick any item and compare **₪/base** across stores.
+- The **✅ cheapest** badge highlights the best unit price.
+- Quickly **Add** packs from the cheapest place to your cart.
+
+---
+
+## 7) Stock rules (Always-buy & Par levels)
+- **Always buy**: item shows up in suggestions no matter what.
+- **Par (base)**: your minimum target in base units (e.g., g/ml/pcs).
+- Click **Save** to keep rules.
+
+---
+
+## 8) ✨ Quick restock suggestions
+- Choose **Target coverage (days)** — how many days you want on hand.
+- **Suggest when stock < days** — threshold for showing a suggestion.
+- **Force adds to store**: pick a store and all “Add to cart” will use it.  
+  If that store already has a known price for the item, its **₪/base** is auto-filled.
+- You can override **Qty (base)**, **₪/base**, and **Expiry** before adding.
+
+---
+
+## 9) 🧺 Cart
+- Edit each line: **Qty (base)**, **₪/base**, **Store**, and **Expiry**.
+- See **Line total**, per-**Store** totals, and **Grand total**.
+- If you exceed the monthly budget (spent + cart), you’ll get a **warning**.
+- **Clear cart** removes everything; **Checkout** posts purchases to inventory.
+
+---
+
+## 10) Save / Load lists (Templates)
+- Save the current cart as a **template** (title required).
+- Load a template later to prefill the cart (quantities + optional store and price hints).
+
+---
+
+### Tips
+- Use **categories** on stores to narrow suggestions & browsing.
+- Keep **price book** data fresh — it powers Cheapest/Restock suggestions.
+- Expiry dates can be auto-suggested, but you can always adjust them.
+
+Happy shopping!
+"""
+    )
+
+
+# -----------------------------
+# Main Shop UI (moved into a helper so we can tab it cleanly)
+# -----------------------------
+def _render_shop_ui(user_id: int):
     # bootstrap DB shapes and clean names
     core.run_shopping_migrations()
     core.migrate_legacy_staple_names(user_id)
@@ -173,7 +268,7 @@ def shopping():
                     if not new_name.strip():
                         st.error("Name is required")
                     else:
-                        item_id = core.create_item_and_price(
+                        _ = core.create_item_and_price(
                             user_id, new_name.strip(), new_type, base_unit,
                             store_sel[0], pack_qty, pack_unit, pack_price, product_url=product_link or None
                         )
@@ -607,6 +702,25 @@ def shopping():
                         "expiration": exp or core.suggest_expiration_for(user_id, item_id, meta[1], meta[2]),
                     })
                 st.success("Template loaded to cart")
+
+
+# -----------------------------
+# UI entry
+# -----------------------------
+def shopping():
+    st.title("🛒 Shopping")
+
+    if "user_id" not in st.session_state:
+        st.warning("Please login first")
+        st.stop()
+    user_id = int(st.session_state["user_id"])
+
+    # Tabs: Shop | Guide
+    tab_shop, tab_guide = st.tabs(["Shop", "Guide"])
+    with tab_shop:
+        _render_shop_ui(user_id)
+    with tab_guide:
+        _render_guide()
 
 
 # Entry points for the router

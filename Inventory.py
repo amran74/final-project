@@ -1,709 +1,121 @@
-# Inventory.py — ingredients + prepared, recipes, batches, frozen state,
-# base units, smart pricing, filters, export, KPI-safe logging,
-# Stable@0 -> "Not stocked" (no expiry), auto-delete for non-stable @0,
-# explicit Delete button, and startup cleanup (expired & depleted).
+# Inventory.py — Streamlit UI thin layer over inventory_core (with Guide tab)
+from __future__ import annotations
+
+from datetime import date
+from typing import List, Tuple
 
 import streamlit as st
-from datetime import datetime, date, timedelta
-from typing import Tuple, Optional, List
-import csv
-import io
+import inventory_core as core
 
-from db import (
-    get_connection,
-    create_tables,
-    _today_keys,
-    _compute_step_count,
-)
+st.set_page_config(page_title="Inventory", page_icon="📦", layout="wide")
 
-# -------------------------
-# Utilities
-# -------------------------
 
-UNITS = ["pcs", "g", "kg", "mg", "ml", "l"]
-BASE_FOR = {"pcs": "pcs", "g": "g", "kg": "g", "mg": "g", "ml": "ml", "l": "ml"}
-MULTIPLIER_TO_BASE = {"pcs": 1.0, "mg": 0.001, "g": 1.0, "kg": 1000.0, "ml": 1.0, "l": 1000.0}
-# Use a sane far future so Streamlit's internal +10y range won't overflow
-FAR_FUTURE = date(2099, 12, 31)
+# --------------------------- GUIDE CONTENT ------------------------------------
+def _inventory_guide():
+    st.title("📘 Inventory Guide")
 
-def to_base(amount: float, unit: str) -> Tuple[float, str]:
-    if unit not in BASE_FOR:
-        return amount, "pcs"
-    return amount * MULTIPLIER_TO_BASE[unit], BASE_FOR[unit]
+    st.markdown("""
+### What this page is
+Track everything you have: ingredients and prepared foods. Log amounts, cost, and expiration, then **use / expire / freeze / thaw** with a click.  
+Price-per-base is always computed so recipes, shopping, and waste analytics stay consistent.
 
-def from_base(amount_base: float, ui_unit: str) -> float:
-    if ui_unit == "kg":
-        return amount_base / 1000.0
-    if ui_unit == "g":
-        return amount_base
-    if ui_unit == "mg":
-        return amount_base * 1000.0
-    if ui_unit == "l":
-        return amount_base / 1000.0
-    if ui_unit == "ml":
-        return amount_base
-    return amount_base  # pcs
+---
 
-def format_price_hint(ui_unit: str, price_per_base: float) -> Tuple[str, str]:
-    if ui_unit in ["kg", "g", "mg"]:
-        return f"{price_per_base * 100:.2f}", "per 100 g"
-    if ui_unit in ["l", "ml"]:
-        return f"{price_per_base * 100:.2f}", "per 100 ml"
-    return f"{price_per_base:.2f}", "per piece"
+### Quick start
+1. **Add an item** at the top (name, kind, type, amount+unit, cost, expiration).  
+2. Toggle **Stable item** if you want it to stay visible even at 0 (e.g., salt, oil).  
+3. Use **Use qty** or **Expire qty** on a card as you cook or toss.  
+4. Click **Freeze/Thaw** to track frozen state and safe‐after‐thaw days.
 
-def compute_price_per_base(total_cost: float, base_amount: float) -> float:
-    if base_amount <= 0:
-        return 0.0
-    return total_cost / base_amount
+---
 
-def parse_iso(d: str) -> date:
-    return datetime.strptime(d, "%Y-%m-%d").date()
+### Search & filters
+- **Search**: matches name or type.  
+- **Kind filter**: show `ingredient`, `prepared`, or `all`.  
+- **State filter**: `fresh`, `frozen`, or `expired soon` (<= 2 days).  
+- **Sort**: by expiration, name, or price per base; choose ascending/descending.
 
-def today() -> date:
-    return date.today()
+---
 
-def iso_today() -> str:
-    return today().strftime("%Y-%m-%d")
+### Units & price math
+- You enter **Amount + Unit** (pcs, g/kg, ml/l).  
+- The app converts to **base units** (pcs/g/ml) and stores an internal `price_per_base`.  
+- The card shows a **hint**:
+  - ₪ per **100 g** for solid weight units
+  - ₪ per **100 ml** for liquid units
+  - ₪ per **piece** for countables
+- **Tip:** Use the “Auto-parse quantity from name” checkbox to extract quantity from names like _“Tuna 500g”_ or _“Eggs 12 pack”_.
 
-def safely_execute(conn, sql, params=()):
-    c = conn.cursor()
-    c.execute(sql, params)
-    conn.commit()
+---
 
-def is_stable_zero(stable: bool, base_amount: float) -> bool:
-    try:
-        return bool(stable) and float(base_amount or 0.0) <= 0.0
-    except Exception:
-        return False
+### Stable items
+- “**Stable**” is for staples you always keep around.  
+- When stable + **0 on hand**, the item is **not removed** and its expiry is ignored (shown as “Not stocked”).  
+- Non-stable items at 0 are automatically cleaned up.
 
-def _auto_delete_if_zero(conn, item_id: int, new_base_amount: float, stable_flag: int) -> bool:
-    """Delete row if depleted AND not stable. Return True if deleted."""
-    if float(new_base_amount or 0.0) <= 0.0 and int(stable_flag or 0) == 0:
-        conn.execute("DELETE FROM inventory WHERE id=?", (item_id,))
-        return True
-    return False
+---
 
-# --- pricing fallbacks (legacy price_per_unit) ---
-def _ppu_to_price_per_base(ppu: float, unit: str, base_unit: str) -> float:
-    if not ppu or ppu <= 0:
-        return 0.0
-    unit = (unit or "").lower()
-    if base_unit == "g":
-        if unit == "kg":   return ppu / 1000.0  # ₪/kg -> ₪/g
-        if unit == "g":    return ppu           # ₪/g
-        if unit == "mg":   return ppu * 1000.0  # ₪/mg -> ₪/g
-        return 0.0
-    if base_unit == "ml":
-        if unit in ("l", "lt", "liter", "litre"): return ppu / 1000.0  # ₪/L -> ₪/ml
-        if unit == "ml":   return ppu
-        return 0.0
-    return ppu  # pieces
+### Using / expiring amounts
+Each card has quick actions:
+- **Use qty** — deducts from on-hand and logs usage (affects “Used” stats).
+- **Expire qty** — marks that quantity as expired (affects “Expired” and “Money lost” stats).
+- **Expire all** — expire the entire remainder.
 
-def _effective_price_per_base(price_per_base: float, price_per_unit: float, unit: str, base_unit: str) -> float:
-    """Use price_per_base if set; otherwise derive from legacy price_per_unit."""
-    return float(price_per_base or 0.0) if (price_per_base or 0) > 0 else _ppu_to_price_per_base(float(price_per_unit or 0.0), unit, base_unit)
+You’ll see usage/expiry counters and cumulative money lost right on the card.
 
-# -------------------------
-# One-time migrations
-# -------------------------
+---
 
-MIGRATIONS = [
-    ("ALTER TABLE inventory ADD COLUMN kind TEXT DEFAULT 'ingredient'",),
-    ("ALTER TABLE inventory ADD COLUMN base_unit TEXT DEFAULT 'pcs'",),
-    ("ALTER TABLE inventory ADD COLUMN base_amount REAL DEFAULT 0.0",),
-    ("ALTER TABLE inventory ADD COLUMN total_cost REAL DEFAULT 0.0",),
-    ("ALTER TABLE inventory ADD COLUMN price_per_base REAL DEFAULT 0.0",),
-    ("ALTER TABLE inventory ADD COLUMN storage_state TEXT DEFAULT 'fresh'",),
-    ("ALTER TABLE inventory ADD COLUMN frozen_at TEXT",),
-    ("ALTER TABLE inventory ADD COLUMN thawed_at TEXT",),
-    ("ALTER TABLE inventory ADD COLUMN frozen_days_accum INTEGER DEFAULT 0",),
-    ("ALTER TABLE inventory ADD COLUMN thaw_shelf_life_days INTEGER",),
-    ("ALTER TABLE inventory ADD COLUMN recipe_note TEXT",),
-    ("ALTER TABLE inventory ADD COLUMN money_lost REAL DEFAULT 0.0",),
-    ("ALTER TABLE inventory ADD COLUMN expired_count INTEGER DEFAULT 0",),
-    ("CREATE TABLE IF NOT EXISTS recipes (id INTEGER PRIMARY KEY AUTOINCREMENT, prepared_item_id INTEGER NOT NULL UNIQUE)",),
-    ("CREATE TABLE IF NOT EXISTS recipe_components (id INTEGER PRIMARY KEY AUTOINCREMENT, recipe_id INTEGER NOT NULL, ingredient_item_id INTEGER NOT NULL, quantity_base REAL NOT NULL, UNIQUE(recipe_id, ingredient_item_id))",),
-    ("CREATE TABLE IF NOT EXISTS batches (id INTEGER PRIMARY KEY AUTOINCREMENT, prepared_item_id INTEGER NOT NULL, cooked_at TEXT NOT NULL, total_yield_base REAL NOT NULL, portion_size_base REAL NOT NULL, remaining_base REAL NOT NULL, expiration TEXT, storage_state TEXT DEFAULT 'fresh', frozen_at TEXT, thawed_at TEXT, frozen_days_accum INTEGER DEFAULT 0, batch_cost REAL)",),
-]
+### Freezing & thawing
+- Click **Freeze** to move the item to the frozen state (expiry handled accordingly).  
+- Click **Thaw** to bring it back; if you set **days safe after thaw**, you’ll get a post-thaw safety window.
 
-def run_migrations():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("PRAGMA table_info(inventory)")
-    cols = {row[1] for row in c.fetchall()}
-    for mig in MIGRATIONS:
-        stmt = mig[0]
-        if stmt.startswith("CREATE TABLE"):
-            try:
-                c.execute(stmt); conn.commit()
-            except Exception:
-                pass
-            continue
-        target_col = stmt.split(" ADD COLUMN ")[1].split(" ")[0]
-        if target_col not in cols:
-            try:
-                c.execute(stmt); conn.commit(); cols.add(target_col)
-            except Exception:
-                pass
-    conn.close()
+---
 
-# -------------------------
-# Expiration with frozen pause
-# -------------------------
+### Prepared items (costed recipes)
+Set **Kind = prepared** to manage things you cook in batches (soups, sauces, bakes):
+1. Open **Recipe** expander on the item card.
+2. Pick ingredients from your inventory, enter **Qty base**, and **Add or update**.
+3. The app totals **ingredient cost** for you.
+4. (Optional) enter an expected **yield** and click **Update item cost from recipe** to push the computed cost back into the item.
 
-def effective_expiration(expiration: str, storage_state: str, frozen_at: Optional[str], thawed_at: Optional[str], frozen_days_accum: int) -> date:
-    base_exp = parse_iso(expiration)
-    paused_days = frozen_days_accum
-    if storage_state == "frozen" and frozen_at:
-        try:
-            paused_days += (today() - parse_iso(frozen_at)).days
-        except Exception:
-            pass
-    return base_exp + timedelta(days=max(0, paused_days))
+#### Batches
+Track production runs:
+- Set cooked date, **portion size**, **total yield**, batch **expiry**, and optional **cost override**; then **Create batch**.  
+- The list shows remaining base amount and lets you **Use one portion** quickly.
 
-def status_badge(eff_exp: date, storage_state: str) -> Tuple[str, str]:
-    if storage_state == "frozen":
-        return "Frozen", "#33BFFF"
-    delta = (eff_exp - today()).days
-    if delta < 0:
-        return "Expired", "#FF4B4B"
-    if delta <= 2:
-        return "Expiring Soon", "#FFA500"
-    return "Fresh", "#4CAF50"
+---
 
-def effective_expiration_display(expiration: str,
-                                 storage_state: str,
-                                 frozen_at: Optional[str],
-                                 thawed_at: Optional[str],
-                                 frozen_days_accum: int,
-                                 stable: bool,
-                                 base_amount: float):
-    if is_stable_zero(stable, base_amount):
-        return FAR_FUTURE, "Not stocked", "#8E8E8E", True
-    eff = effective_expiration(expiration, storage_state, frozen_at, thawed_at, frozen_days_accum)
-    txt, color = status_badge(eff, storage_state)
-    return eff, txt, color, False
+### Editing items
+- Use the **Edit** expander: change name, expiry, type, display unit, amount, total cost, kind, thaw days, and notes.  
+- **Delete** requires a confirm checkbox to prevent accidents.
 
-# -------------------------
-# Data access
-# -------------------------
+---
 
-def add_item(user_id: int, name: str, expiration: str, food_type: str,
-             ui_amount: float, ui_unit: str, total_cost: float,
-             kind: str, stable: bool, recipe_note: Optional[str],
-             thaw_shelf_life_days: Optional[int]):
-    base_amount, base_unit = to_base(ui_amount, ui_unit)
-    price_per_base = compute_price_per_base(total_cost, base_amount)
-    exp_to_store = (FAR_FUTURE if is_stable_zero(stable, base_amount) else parse_iso(expiration)).strftime("%Y-%m-%d")
-    conn = get_connection()
-    safely_execute(conn, """
-        INSERT INTO inventory
-        (user_id, name, expiration, type, amount, unit, used_count, last_used_month, stable,
-         price_per_unit, expired_count, money_lost,
-         kind, base_unit, base_amount, total_cost, price_per_base,
-         storage_state, frozen_at, thawed_at, frozen_days_accum, thaw_shelf_life_days, recipe_note)
-        VALUES (?, ?, ?, ?, ?, ?, 0, strftime('%Y-%m','now'), ?, 0.0, 0, 0.0,
-                ?, ?, ?, ?, ?, 'fresh', NULL, NULL, 0, ?, ?)
-    """, (user_id, name, exp_to_store, food_type, ui_amount, ui_unit, int(stable),
-          kind, base_unit, base_amount, total_cost, price_per_base, thaw_shelf_life_days, recipe_note))
-    conn.close()
+### Export
+Click **Export CSV** to download your (filtered) inventory as a spreadsheet.
 
-def get_user_items(user_id: int):
-    conn = get_connection(); c = conn.cursor()
-    c.execute("""
-        SELECT id, name, expiration, type, amount, unit, used_count, last_used_month, stable,
-               price_per_unit, COALESCE(expired_count,0), COALESCE(money_lost,0.0),
-               kind, base_unit, base_amount, total_cost, price_per_base,
-               storage_state, frozen_at, thawed_at, COALESCE(frozen_days_accum,0),
-               thaw_shelf_life_days, recipe_note
-        FROM inventory
-        WHERE user_id=?
-        ORDER BY date(expiration) ASC, name ASC
-    """, (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
+---
 
-def delete_item(item_id: int):
-    conn = get_connection()
-    safely_execute(conn, "DELETE FROM inventory WHERE id=?", (item_id,))
-    conn.close()
+### FAQ & tips
+- **Why is “Not stocked” shown?**  
+  That’s a stable item at zero; we keep it for convenience.
+- **My g/ml items nudge by big steps when using qty inputs.**  
+  We default to **100 g / 100 ml** for speed; change the number field if you need a custom amount.
+- **Price per base is missing?**  
+  Add **Total cost** when creating/editing, or compute from prepared recipe cost.
+- **Performance tip**: Filtering and sorting are done in-memory for snappy UI. Tighten search/filters when you have thousands of items.
+    """)
 
-def update_item(item_id: int, name: str, expiration: str, food_type: str,
-                ui_amount: float, ui_unit: str, total_cost: float,
-                kind: str, thaw_shelf_life_days: Optional[int], recipe_note: Optional[str],
-                stable_flag: Optional[bool] = None):
-    base_amount, base_unit = to_base(ui_amount, ui_unit)
-    price_per_base = compute_price_per_base(total_cost, base_amount)
+    st.info("You can hide this guide any time — it won’t affect your data.")
 
-    conn = get_connection(); c = conn.cursor()
-    if stable_flag is None:
-        c.execute("SELECT COALESCE(stable,0) FROM inventory WHERE id=?", (item_id,))
-        row = c.fetchone()
-        current_stable = bool((row[0] if row else 0))
-    else:
-        current_stable = bool(stable_flag)
 
-    exp_to_store = (FAR_FUTURE if is_stable_zero(current_stable, base_amount) else parse_iso(expiration)).strftime("%Y-%m-%d")
-
-    c.execute("""
-        UPDATE inventory
-        SET name=?, expiration=?, type=?, amount=?, unit=?, total_cost=?, price_per_base=?,
-            base_amount=?, base_unit=?, kind=?, thaw_shelf_life_days=?, recipe_note=?
-        WHERE id=?
-    """, (name, exp_to_store, food_type, ui_amount, ui_unit, total_cost, price_per_base,
-          base_amount, base_unit, kind, thaw_shelf_life_days, recipe_note, item_id))
-
-    deleted = _auto_delete_if_zero(conn, item_id, base_amount, 1 if current_stable else 0)
-    conn.commit(); conn.close()
-    if deleted:
-        return
-
-# -------------------------
-# Actions (KPI-safe + auto-delete when depleted)
-# -------------------------
-
-def use_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, str]:
-    base_qty, _ = to_base(qty_ui, ui_unit)
-    if base_qty <= 0:
-        return False, "Quantity must be positive"
-
-    conn = get_connection(); c = conn.cursor()
-    c.execute("SELECT base_amount, storage_state, user_id, unit, COALESCE(stable,0) FROM inventory WHERE id=?", (item_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close(); return False, "Item not found"
-
-    base_amount, storage_state, user_id, unit_row, stable_flag = row
-    if storage_state == "frozen":
-        conn.close(); return False, "Cannot use while frozen. Thaw first."
-    if base_qty > float(base_amount or 0):
-        conn.close(); return False, "Not enough on hand"
-
-    new_amount = float(base_amount) - base_qty
-    step_inc = _compute_step_count(qty_ui, ui_unit)
-
-    c.execute("""
-        UPDATE inventory
-        SET base_amount=?, used_count=COALESCE(used_count,0)+?, last_used_month=strftime('%Y-%m','now')
-        WHERE id=?
-    """, (new_amount, int(step_inc), item_id))
-
-    ts, month_key = _today_keys()
-    c.execute("""
-      INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
-      VALUES (?, ?, 'used', ?, ?, ?, 0.0, ?, ?)
-    """, (user_id, item_id, float(qty_ui), (unit_row or ui_unit), int(step_inc), ts, month_key))
-
-    deleted = _auto_delete_if_zero(conn, item_id, new_amount, stable_flag)
-    conn.commit(); conn.close()
-    if deleted:
-        return True, f"Used {qty_ui} {ui_unit}. Item removed (depleted)."
-    return True, f"Used {qty_ui} {ui_unit}"
-
-def expire_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, str]:
-    base_qty, _ = to_base(qty_ui, ui_unit)
-    if base_qty <= 0:
-        return False, "Quantity must be positive"
-
-    conn = get_connection(); c = conn.cursor()
-    c.execute("""
-      SELECT user_id, base_amount, price_per_base, unit, price_per_unit, base_unit, COALESCE(stable,0)
-      FROM inventory WHERE id=?
-    """, (item_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close(); return False, "Item not found"
-
-    user_id, base_amount, price_per_base, unit_row, ppu_legacy, base_unit, stable_flag = row
-    base_amount = float(base_amount or 0.0)
-    if base_amount <= 0:
-        conn.close(); return False, "Nothing to expire"
-
-    expired_base = min(base_qty, base_amount)
-    new_amount = base_amount - expired_base
-
-    price_pb = _effective_price_per_base(price_per_base, ppu_legacy, unit_row, base_unit)
-    lost_value = round(expired_base * float(price_pb or 0.0), 2)
-    step_inc = _compute_step_count(qty_ui, ui_unit)
-
-    c.execute("""
-        UPDATE inventory
-        SET base_amount=?, money_lost=COALESCE(money_lost,0)+?, expired_count=COALESCE(expired_count,0)+?,
-            last_used_month=strftime('%Y-%m','now')
-        WHERE id=?
-    """, (new_amount, lost_value, int(step_inc), item_id))
-
-    ts, month_key = _today_keys()
-    expired_ui = from_base(expired_base, ui_unit)
-    c.execute("""
-      INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
-      VALUES (?, ?, 'expired', ?, ?, ?, ?, ?, ?)
-    """, (user_id, item_id, float(expired_ui), (unit_row or ui_unit), int(step_inc), float(lost_value), ts, month_key))
-
-    deleted = _auto_delete_if_zero(conn, item_id, new_amount, stable_flag)
-    conn.commit(); conn.close()
-    msg = f"Expired {expired_ui:.2f} {ui_unit}. Lost ₪{lost_value:.2f}"
-    if deleted:
-        msg += " — Item removed (depleted)."
-    return True, msg
-
-def expire_all(item_id: int) -> Tuple[bool, str]:
-    conn = get_connection(); c = conn.cursor()
-    c.execute("""
-      SELECT user_id, base_amount, price_per_base, name, unit, price_per_unit, base_unit, COALESCE(stable,0)
-      FROM inventory WHERE id=?
-    """, (item_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close(); return False, "Item not found"
-
-    user_id, base_amount, price_per_base, name, unit_row, ppu_legacy, base_unit, stable_flag = row
-    base_amount = float(base_amount or 0.0)
-    if base_amount <= 0:
-        conn.close(); return False, f"Nothing to expire for {name}"
-
-    price_pb = _effective_price_per_base(price_per_base, ppu_legacy, unit_row, base_unit)
-    loss = round(base_amount * float(price_pb or 0.0), 2)
-    step_inc = _compute_step_count(base_amount, base_unit or "pcs")
-
-    ts, month_key = _today_keys()
-    c.execute("""
-      INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
-      VALUES (?, ?, 'expired', ?, ?, ?, ?, ?, ?)
-    """, (user_id, item_id, base_amount, (base_unit or "pcs"), int(step_inc), float(loss), ts, month_key))
-
-    if int(stable_flag or 0) == 0:
-        c.execute("DELETE FROM inventory WHERE id=?", (item_id,))
-        conn.commit(); conn.close()
-        return True, f"Expired all of {name}. Lost ₪{loss:.2f} (removed)"
-    else:
-        ff = FAR_FUTURE.strftime("%Y-%m-%d")
-        c.execute("""
-            UPDATE inventory
-            SET base_amount=0, money_lost=COALESCE(money_lost,0)+?, expired_count=COALESCE(expired_count,0)+?,
-                last_used_month=strftime('%Y-%m','now'),
-                expiration=?, storage_state='fresh', frozen_at=NULL, thawed_at=NULL
-            WHERE id=?
-        """, (loss, int(step_inc), ff, item_id))
-        conn.commit(); conn.close()
-        return True, f"Expired all of {name}. Lost ₪{loss:.2f}"
-
-def freeze_item(item_id: int) -> Tuple[bool, str]:
-    conn = get_connection(); c = conn.cursor()
-    c.execute("SELECT storage_state FROM inventory WHERE id=?", (item_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close(); return False, "Item not found"
-    state = row[0]
-    if state == "frozen":
-        conn.close(); return False, "Already frozen"
-    c.execute("UPDATE inventory SET storage_state='frozen', frozen_at=? WHERE id=?", (iso_today(), item_id))
-    conn.commit(); conn.close()
-    return True, "Frozen"
-
-def thaw_item(item_id: int) -> Tuple[bool, str]:
-    conn = get_connection(); c = conn.cursor()
-    c.execute("SELECT storage_state, frozen_at, COALESCE(frozen_days_accum,0) FROM inventory WHERE id=?", (item_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close(); return False, "Item not found"
-    state, frozen_at, accum = row
-    if state != "frozen":
-        conn.close(); return False, "Not frozen"
-    extra_days = 0
-    if frozen_at:
-        try:
-            extra_days = (today() - parse_iso(frozen_at)).days
-        except Exception:
-            extra_days = 0
-    c.execute("""
-        UPDATE inventory
-        SET storage_state='fresh', thawed_at=?, frozen_days_accum=?, frozen_at=NULL
-        WHERE id=?
-    """, (iso_today(), int(accum) + max(0, extra_days), item_id))
-    conn.commit(); conn.close()
-    return True, "Thawed"
-
-# -------------------------
-# Recipes and batches
-# -------------------------
-
-def _ensure_recipe(prepared_item_id: int) -> int:
-    conn = get_connection(); c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO recipes(prepared_item_id) VALUES (?)", (prepared_item_id,))
-    conn.commit()
-    c.execute("SELECT id FROM recipes WHERE prepared_item_id=?", (prepared_item_id,))
-    rid = c.fetchone()[0]
-    conn.close()
-    return rid
-
-def recipe_editor(prepared_item_id: int, user_id: int):
-    rid = _ensure_recipe(prepared_item_id)
-    conn = get_connection(); c = conn.cursor()
-
-    st.caption("Build the recipe by adding ingredients and quantities in base units.")
-
-    c.execute("""
-      SELECT id, name, base_unit, price_per_base
-      FROM inventory
-      WHERE user_id=? AND kind='ingredient'
-      ORDER BY name
-    """, (user_id,))
-    ing_rows = c.fetchall()
-
-    if not ing_rows:
-        st.info("No ingredients in inventory yet.")
-        conn.close()
-        return
-
-    def _fmt(row):
-        _id, _name, _base_unit, _ppb = row
-        return f"{_name} [{_base_unit}]  (₪/base {(_ppb or 0):.2f})"
-
-    col1, col2, col3 = st.columns([2, 1, 1])
-    selected = col1.selectbox("Ingredient", options=ing_rows, format_func=_fmt, key=f"ri_sel_{prepared_item_id}")
-    qty = col2.number_input("Qty base", min_value=0.0, step=1.0, value=0.0, key=f"ri_qty_{prepared_item_id}")
-    if col3.button("Add or update", key=f"ri_add_{prepared_item_id}"):
-        c.execute("""
-          INSERT INTO recipe_components(recipe_id, ingredient_item_id, quantity_base)
-          VALUES (?,?,?)
-          ON CONFLICT(recipe_id, ingredient_item_id) DO UPDATE SET quantity_base=excluded.quantity_base
-        """, (rid, selected[0], float(qty)))
-        conn.commit()
-        st.success("Component saved")
-        st.experimental_rerun()
-
-    c.execute("""
-      SELECT rc.id, i.name, i.base_unit, rc.quantity_base, i.price_per_base
-      FROM recipe_components rc
-      JOIN inventory i ON i.id = rc.ingredient_item_id
-      WHERE rc.recipe_id=?
-      ORDER BY i.name
-    """, (rid,))
-    comps = c.fetchall()
-
-    total_cost = 0.0
-    if comps:
-        for cid, nm, bu, q, ppb in comps:
-            line_cost = float(q) * float(ppb or 0.0)
-            total_cost += line_cost
-            d1, d2, d3, d4 = st.columns([2, 1, 1, 1])
-            d1.write(nm)
-            d2.write(f"{q:.2f} {bu}")
-            d3.write(f"₪{(ppb or 0.0):.2f}/base")
-            if d4.button("Remove", key=f"ri_del_{cid}"):
-                c.execute("DELETE FROM recipe_components WHERE id=?", (cid,))
-                conn.commit()
-                st.warning("Removed")
-                st.experimental_rerun()
-
-        st.metric("Estimated total ingredient cost", f"₪{total_cost:.2f}")
-
-        colu1, colu2 = st.columns([1, 2])
-        new_yield = colu1.number_input("Expected yield base", min_value=0.0, step=1.0, value=0.0, key=f"ri_yield_{prepared_item_id}")
-        if colu2.button("Update item cost from recipe", key=f"ri_push_{prepared_item_id}"):
-            cx = conn.cursor()
-            cx.execute("SELECT base_amount FROM inventory WHERE id=?", (prepared_item_id,))
-            cur_base = float((cx.fetchone() or [0])[0] or 0.0)
-            yield_base = float(new_yield or cur_base)
-            price_per_base = (total_cost / yield_base) if yield_base > 0 else 0.0
-            cx.execute("UPDATE inventory SET total_cost=?, price_per_base=? WHERE id=?", (total_cost, price_per_base, prepared_item_id))
-            conn.commit()
-            st.success(f"Item updated. Price per base now ₪{price_per_base:.2f}")
-            st.experimental_rerun()
-    else:
-        st.info("No components yet.")
-
-    conn.close()
-
-def create_batch(prepared_item_id: int):
-    with st.expander("Create batch for this prepared item"):
-        col1, col2, col3 = st.columns(3)
-        cooked = col1.date_input("Cooked at", value=today(), max_value=FAR_FUTURE, key=f"b_dt_{prepared_item_id}")
-        total_yield_base = col2.number_input("Total yield base", min_value=0.0, step=1.0, value=0.0, key=f"b_ty_{prepared_item_id}")
-        portion_size_base = col3.number_input("Portion size base", min_value=0.0, step=1.0, value=0.0, key=f"b_ps_{prepared_item_id}")
-        e1, e2 = st.columns(2)
-        batch_exp = e1.date_input("Batch expiration", value=today(), max_value=FAR_FUTURE, key=f"b_ex_{prepared_item_id}")
-        batch_cost = e2.number_input("Batch cost override ₪", min_value=0.0, step=0.1, value=0.0, key=f"b_cost_{prepared_item_id}")
-        if st.button("Create batch", key=f"b_create_{prepared_item_id}"):
-            conn = get_connection()
-            safely_execute(conn, """
-              INSERT INTO batches(prepared_item_id, cooked_at, total_yield_base, portion_size_base, remaining_base, expiration, storage_state, batch_cost)
-              VALUES (?, ?, ?, ?, ?, ?, 'fresh', ?)
-            """, (prepared_item_id, cooked.strftime("%Y-%m-%d"), float(total_yield_base), float(portion_size_base), float(total_yield_base), batch_exp.strftime("%Y-%m-%d"), float(batch_cost)))
-            conn.close()
-            st.success("Batch created")
-            st.experimental_rerun()
-
-def list_batches(prepared_item_id: int):
-    conn = get_connection(); c = conn.cursor()
-    c.execute("""
-      SELECT id, cooked_at, total_yield_base, portion_size_base, remaining_base, expiration, storage_state
-      FROM batches
-      WHERE prepared_item_id=?
-      ORDER BY date(cooked_at) DESC
-    """, (prepared_item_id,))
-    rows = c.fetchall()
-    conn.close()
-    if not rows:
-        st.caption("No batches yet.")
-        return
-    for bid, cooked, total_y, portion, remaining, exp, state in rows:
-        col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 1.5, 2])
-        col1.write(f"Cooked {cooked}")
-        col2.write(f"Remaining {remaining:.1f} base")
-        col3.write(f"Portion {portion:.1f} base")
-        col4.write(state)
-        if col5.button("Use one portion", key=f"b_use_{bid}"):
-            use_batch_portion(bid)
-            st.success("Portion used")
-            st.experimental_rerun()
-
-def use_batch_portion(batch_id: int):
-    conn = get_connection(); c = conn.cursor()
-    c.execute("SELECT remaining_base, portion_size_base FROM batches WHERE id=?", (batch_id,))
-    r = c.fetchone()
-    if not r:
-        conn.close(); return
-    remaining, portion = r
-    new_remaining = max(0.0, float(remaining) - float(portion or 0.0))
-    c.execute("UPDATE batches SET remaining_base=? WHERE id=?", (new_remaining, batch_id))
-    conn.commit(); conn.close()
-
-# -------------------------
-# Export
-# -------------------------
-
-def export_csv(rows: List[tuple]) -> bytes:
-    out = io.StringIO()
-    writer = csv.writer(out)
-    writer.writerow([
-        "id","name","expiration","type","amount_ui","unit_ui","used_count","last_used_month","stable",
-        "price_per_unit_legacy","expired_count","money_lost","kind","base_unit","base_amount",
-        "total_cost","price_per_base","storage_state","frozen_at","thawed_at","frozen_days_accum",
-        "thaw_shelf_life_days","recipe_note"
-    ])
-    for r in rows:
-        writer.writerow(list(r))
-    return out.getvalue().encode("utf-8")
-
-# -------------------------
-# Startup cleanup (safety sweeps)
-def normalize_stable_zero_expiry(user_id: int) -> int:
-    """Update stable items at 0 to use far-future expiration so they never show as "expiring soon"."""
-    conn = get_connection(); c = conn.cursor()
-    ff = FAR_FUTURE.strftime("%Y-%m-%d")
-    c.execute(
-        """
-        UPDATE inventory
-        SET expiration=?
-        WHERE user_id=?
-          AND COALESCE(stable,0)=1
-          AND COALESCE(base_amount,0)<=0
-          AND date(expiration) < date(?)
-        """,
-        (ff, user_id, ff),
-    )
-    updated = c.rowcount or 0
-    conn.commit(); conn.close()
-    return updated
-
-# -------------------------
-
-def cleanup_depleted_items(user_id: int) -> int:
-    """Hard-delete any non-stable items that somehow remained at 0 from older logic."""
-    conn = get_connection(); c = conn.cursor()
-    c.execute("""
-        DELETE FROM inventory
-        WHERE user_id=? AND COALESCE(stable,0)=0 AND COALESCE(base_amount,0)<=0
-    """, (user_id,))
-    deleted = c.rowcount or 0
-    conn.commit(); conn.close()
-    return deleted
-
-def cleanup_expired_items(user_id: int) -> int:
-    """
-    Auto-handle any items whose effective expiration is today or earlier.
-
-    - Non-stable: expire full remaining quantity (log value), then DELETE the row.
-    - Stable: expire full remaining quantity (log value), set base_amount=0 and push expiration
-      to FAR_FUTURE so it becomes "Not stocked".
-    Returns how many non-stable rows were removed.
-    """
-    conn = get_connection(); c = conn.cursor()
-    c.execute("""
-        SELECT id, user_id, base_amount, price_per_base, unit, price_per_unit, base_unit, name,
-               expiration, storage_state, frozen_at, thawed_at, COALESCE(frozen_days_accum,0),
-               COALESCE(stable,0)
-        FROM inventory
-        WHERE user_id=?
-    """, (user_id,))
-    rows = c.fetchall()
-
-    removed = 0
-    ts, month_key = _today_keys()
-    for (item_id, uid, base_amt, ppb, unit_row, ppu_legacy, base_unit, nm,
-         expiration, storage_state, frozen_at, thawed_at, frozen_days_accum, stable_flag) in rows:
-
-        base_amt = float(base_amt or 0.0)
-        if base_amt <= 0:
-            continue
-
-        eff_exp = effective_expiration(expiration, storage_state, frozen_at, thawed_at, int(frozen_days_accum or 0))
-        if eff_exp > today():
-            continue  # not expired yet
-
-        price_pb = _effective_price_per_base(ppb, ppu_legacy, unit_row, base_unit)
-        loss = round(base_amt * float(price_pb or 0.0), 2)
-        step_inc = _compute_step_count(base_amt, base_unit or "pcs")
-
-        # Log to usage_log so monthly KPIs can read it
-        c.execute("""
-          INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
-          VALUES (?, ?, 'expired', ?, ?, ?, ?, ?, ?)
-        """, (uid, item_id, base_amt, (base_unit or "pcs"), int(step_inc), float(loss), ts, month_key))
-
-        if int(stable_flag or 0) == 0:
-            # Non-stable: delete the row entirely
-            c.execute("DELETE FROM inventory WHERE id=?", (item_id,))
-            removed += 1
-        else:
-            # Stable: zero out and park in far future so it shows as "Not stocked"
-            ff = FAR_FUTURE.strftime("%Y-%m-%d")
-            c.execute("""
-                UPDATE inventory
-                SET base_amount=0,
-                    money_lost=COALESCE(money_lost,0)+?,
-                    expired_count=COALESCE(expired_count,0)+?,
-                    expiration=?,
-                    storage_state='fresh',
-                    frozen_at=NULL,
-                    thawed_at=NULL
-                WHERE id=?
-            """, (loss, int(step_inc), ff, item_id))
-
-    conn.commit(); conn.close()
-    return removed
-
-# -------------------------
-# UI
-# -------------------------
-
-def inventory():
-    st.title("📦 Inventory")
-    if "user_id" not in st.session_state:
-        st.warning("Please login first")
-        st.stop()
-    user_id = st.session_state["user_id"]
-
-    create_tables()
-    run_migrations()
-
-    # safety sweeps
-    fixed_stable0 = normalize_stable_zero_expiry(user_id)
-    removed_zeros = cleanup_depleted_items(user_id)
-    removed_expired = cleanup_expired_items(user_id)
+# --------------------------- BROWSE/UI ----------------------------------------
+def _browse_inventory(user_id: int):
+    # Migrations + safety sweeps
+    core.run_migrations()
+    fixed_stable0 = core.normalize_stable_zero_expiry(user_id)
+    removed_zeros = core.cleanup_depleted_items(user_id)
+    removed_expired = core.cleanup_expired_items(user_id)
     if fixed_stable0 or removed_zeros or removed_expired:
         msg = []
         if fixed_stable0: msg.append(f"fixed {fixed_stable0} stable@0 expiry")
@@ -711,6 +123,7 @@ def inventory():
         if removed_expired: msg.append(f"auto-removed {removed_expired} expired")
         st.info(", ".join(msg) + " item(s).")
 
+    # Filters
     with st.container():
         l1, l2, l3, l4, l5 = st.columns([2, 1.2, 1.2, 1, 1])
         query = l1.text_input("Search by name or type", placeholder="milk, rice, pizza")
@@ -721,29 +134,36 @@ def inventory():
 
     st.caption("Stable items at 0 show as ‘Not stocked’ (no expiry). Non-stable items at 0 are removed automatically.")
 
-    # add form
+    # Add form
     with st.form("add_item_form", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns([2, 1.2, 1.2, 1])
         name = c1.text_input("Name")
         kind = c2.selectbox("Kind", ["ingredient", "prepared"])
-        typ = c3.selectbox("Type", ["Dairy", "Fruit", "Meat", "Grain", "Vegetable", "Other"])
-        exp = c4.date_input("Expiration", value=today(), min_value=today(), max_value=FAR_FUTURE)
+        typ = c3.selectbox("Type", core.CATEGORIES, index=core.CATEGORIES.index("Other"))
+        exp = c4.date_input("Expiration", value=core.today(), min_value=core.today(), max_value=core.FAR_FUTURE)
 
         d1, d2, d3 = st.columns([1, 1, 1])
         amount_ui = d1.number_input("Amount", min_value=0.0, step=0.1, value=1.0)
-        unit_ui = d2.selectbox("Unit", UNITS)
+        unit_ui = d2.selectbox("Unit", core.UNITS)
         total_cost = d3.number_input("Total cost ₪", min_value=0.0, step=0.1, value=0.0)
 
         stable = st.checkbox("Stable item keep visible at zero")
         recipe_note = st.text_area("Notes optional", placeholder="Anything to remember about this item or recipe")
         thaw_days = st.number_input("Days safe after thaw optional", min_value=0, step=1, value=0)
+        auto_parse = st.checkbox("Auto-parse quantity from name (e.g., 'Eggs 12 pack', 'Tuna 500g')", value=True)
 
-        base_amount, base_unit = to_base(amount_ui, unit_ui)
-        ppb = compute_price_per_base(total_cost, base_amount)
-        hint_val, hint_lbl = format_price_hint(unit_ui, ppb)
-        st.info(f"Stored as {base_amount:.2f} {base_unit}. Price hint {hint_val} {hint_lbl}")
+        base_amount, base_unit = core.to_base(amount_ui, unit_ui)
+        ppb = core.compute_price_per_base(total_cost, base_amount)
 
-        if is_stable_zero(stable, base_amount):
+        def _fmt_price_hint(ui_unit: str, price_per_base: float):
+            if ui_unit in ["kg", "g", "mg"]:   return f"{price_per_base * 100:.2f}", "per 100 g"
+            if ui_unit in ["l", "ml"]:         return f"{price_per_base * 100:.2f}", "per 100 ml"
+            return f"{price_per_base:.2f}", "per piece"
+
+        hint_val, hint_lbl = _fmt_price_hint(unit_ui, ppb)
+        st.info(f"Stored as {base_amount:.2f} {base_unit}. Price hint ₪{hint_val} {hint_lbl}")
+
+        if core.is_stable_zero(stable, base_amount):
             st.caption("Stable + 0: expiry will be ignored (shown as Not stocked).")
 
         submitted = st.form_submit_button("Add item")
@@ -751,7 +171,7 @@ def inventory():
             if not name.strip():
                 st.error("Name is required")
             else:
-                add_item(
+                core.add_item(
                     user_id=user_id,
                     name=name.strip(),
                     expiration=exp.strftime("%Y-%m-%d"),
@@ -762,15 +182,16 @@ def inventory():
                     kind=kind,
                     stable=stable,
                     recipe_note=recipe_note.strip() if recipe_note else None,
-                    thaw_shelf_life_days=int(thaw_days) if thaw_days else None
+                    thaw_shelf_life_days=int(thaw_days) if thaw_days else None,
+                    auto_parse=auto_parse
                 )
                 st.success("Added")
                 st.rerun()
 
-    # list items
-    rows = get_user_items(user_id)
+    # Fetch rows
+    rows = core.get_user_items(user_id)
 
-    # filters
+    # Filter in memory
     filtered = []
     for r in rows:
         (
@@ -786,17 +207,16 @@ def inventory():
         if kind_filter != "all" and kind != kind_filter:
             continue
 
-        eff_exp, status_text, color, no_expiry = effective_expiration_display(
+        eff_exp, status_text, color, no_expiry = core.effective_expiration_display(
             exp, storage_state, frozen_at, thawed_at, int(frozen_days_accum or 0), stable, base_amount
         )
         if state_filter == "frozen" and storage_state != "frozen":
             continue
         if state_filter == "expired soon":
-            if no_expiry or (eff_exp - today()).days > 2:
+            if no_expiry or (eff_exp - core.today()).days > 2:
                 continue
         filtered.append((r, eff_exp, status_text, color, no_expiry))
 
-    # sorting
     reverse = direction == "desc"
     if sort_by == "name":
         filtered.sort(key=lambda x: (x[0][1] or "").lower(), reverse=reverse)
@@ -805,14 +225,15 @@ def inventory():
     else:
         filtered.sort(key=lambda x: x[1], reverse=reverse)
 
-    # export
-    exp_bytes = export_csv([f[0] for f in filtered] if filtered else rows)
+    # Export
+    exp_bytes = core.export_csv([f[0] for f in filtered] if filtered else rows)
     st.download_button("Export CSV", data=exp_bytes, file_name="inventory_export.csv", mime="text/csv")
 
     if not filtered:
         st.info("No items yet. Add something")
         return
 
+    # Render cards
     colA, colB = st.columns(2)
     for i, (r, eff_exp, status_text, color, no_expiry) in enumerate(filtered):
         (
@@ -821,8 +242,14 @@ def inventory():
             storage_state, frozen_at, thawed_at, frozen_days_accum, thaw_days, recipe_note
         ) = r
 
-        price_pb_display = _effective_price_per_base(price_per_base, ppu_legacy, unit_ui, base_unit)
-        hint_val, hint_lbl = format_price_hint(unit_ui if unit_ui in UNITS else base_unit, float(price_pb_display or 0.0))
+        price_pb_display = core.effective_price_per_base(price_per_base, ppu_legacy, unit_ui, base_unit)
+
+        def _fmt_price_hint(ui_unit: str, price_per_base: float):
+            if ui_unit in ["kg", "g", "mg"]:   return f"{price_per_base * 100:.2f}", "per 100 g"
+            if ui_unit in ["l", "ml"]:         return f"{price_per_base * 100:.2f}", "per 100 ml"
+            return f"{price_per_base:.2f}", "per piece"
+
+        hint_val, hint_lbl = _fmt_price_hint(unit_ui if unit_ui in core.UNITS else base_unit, float(price_pb_display or 0.0))
 
         host = colA if i % 2 == 0 else colB
         with host:
@@ -840,7 +267,6 @@ def inventory():
                 </div>
             """, unsafe_allow_html=True)
 
-            # Actions
             a1, a2, a3, a4, a5 = st.columns([1.2, 1.4, 1.2, 1.2, 1.2])
             if base_unit == "g":
                 step = 100.0; qty_label_unit = "g"
@@ -853,69 +279,118 @@ def inventory():
                                   min_value=0.0, step=step, value=0.0, key=f"qty_{item_id}")
 
             if a1.button("Use qty", key=f"use_{item_id}"):
-                ok, msg = use_quantity(item_id, qty, base_unit)
-                st.success(msg) if ok else st.error(msg)
-                st.rerun()
+                ok, msg = core.use_quantity(item_id, qty, base_unit)
+                st.success(msg) if ok else st.error(msg); st.rerun()
 
             if a3.button("Expire qty", key=f"exp_{item_id}"):
-                ok, msg = expire_quantity(item_id, qty, base_unit)
-                st.warning(msg) if ok else st.error(msg)
-                st.rerun()
+                ok, msg = core.expire_quantity(item_id, qty, base_unit)
+                st.warning(msg) if ok else st.error(msg); st.rerun()
 
             if a4.button("Expire all", key=f"expall_{item_id}"):
-                ok, msg = expire_all(item_id)
-                st.error(msg) if ok else st.error(msg)
-                st.rerun()
+                ok, msg = core.expire_all(item_id)
+                st.error(msg) if ok else st.error(msg); st.rerun()
 
             if storage_state != "frozen":
                 if a5.button("Freeze", key=f"freeze_{item_id}"):
-                    ok, msg = freeze_item(item_id)
-                    st.info(msg) if ok else st.error(msg)
-                    st.rerun()
+                    ok, msg = core.freeze_item(item_id)
+                    st.info(msg) if ok else st.error(msg); st.rerun()
             else:
                 if a5.button("Thaw", key=f"thaw_{item_id}"):
-                    ok, msg = thaw_item(item_id)
-                    st.info(msg) if ok else st.error(msg)
-                    st.rerun()
+                    ok, msg = core.thaw_item(item_id)
+                    st.info(msg) if ok else st.error(msg); st.rerun()
 
-            # prepared extras
             if kind == "prepared":
                 with st.expander("Recipe"):
-                    recipe_editor(item_id, user_id)
+                    # ingredient picker
+                    conn = core.get_connection()
+                    cur = conn.cursor()
+                    cur.execute("""
+                      SELECT id, name, base_unit, price_per_base
+                      FROM inventory
+                      WHERE user_id=? AND kind='ingredient'
+                      ORDER BY name
+                    """, (user_id,))
+                    ing_rows = cur.fetchall(); conn.close()
+
+                    if not ing_rows:
+                        st.info("No ingredients in inventory yet.")
+                    else:
+                        def _fmt(row): return f"{row[1]} [{row[2]}]  (₪/base {(row[3] or 0):.2f})"
+                        col1, col2, col3 = st.columns([2, 1, 1])
+                        selected = col1.selectbox("Ingredient", options=ing_rows, format_func=_fmt, key=f"ri_sel_{item_id}")
+                        qtyb = col2.number_input("Qty base", min_value=0.0, step=1.0, value=0.0, key=f"ri_qty_{item_id}")
+                        if col3.button("Add or update", key=f"ri_add_{item_id}"):
+                            core.add_or_update_recipe_component(item_id, selected[0], float(qtyb))
+                            st.success("Component saved"); st.rerun()
+
+                        comps = core.recipe_components(user_id, item_id)
+                        total_cost = 0.0
+                        for cid, nm, bu, q, ppb in comps:
+                            line_cost = float(q) * float(ppb or 0.0); total_cost += line_cost
+                            d1, d2, d3, d4 = st.columns([2, 1, 1, 1])
+                            d1.write(nm); d2.write(f"{q:.2f} {bu}"); d3.write(f"₪{(ppb or 0.0):.2f}/base")
+                            if d4.button("Remove", key=f"ri_del_{cid}"):
+                                core.delete_recipe_component(cid); st.warning("Removed"); st.rerun()
+                        if comps:
+                            st.metric("Estimated total ingredient cost", f"₪{total_cost:.2f}")
+                            colu1, colu2 = st.columns([1, 2])
+                            new_yield = colu1.number_input("Expected yield base", min_value=0.0, step=1.0, value=0.0, key=f"ri_yield_{item_id}")
+                            if colu2.button("Update item cost from recipe", key=f"ri_push_{item_id}"):
+                                core.push_recipe_cost_to_item(item_id, total_cost, float(new_yield or 0.0))
+                                st.success("Item updated from recipe"); st.rerun()
+
                 with st.expander("Batches"):
-                    create_batch(item_id)
-                    list_batches(item_id)
+                    e1, e2, e3 = st.columns(3)
+                    cooked = e1.date_input("Cooked at", value=core.today(), max_value=core.FAR_FUTURE, key=f"b_dt_{item_id}")
+                    portion = e2.number_input("Portion size base", min_value=0.0, step=1.0, value=0.0, key=f"b_ps_{item_id}")
+                    total_y = e3.number_input("Total yield base", min_value=0.0, step=1.0, value=0.0, key=f"b_ty_{item_id}")
+                    k1, k2 = st.columns(2)
+                    batch_exp = k1.date_input("Batch expiration", value=core.today(), max_value=core.FAR_FUTURE, key=f"b_ex_{item_id}")
+                    batch_cost = k2.number_input("Batch cost override ₪", min_value=0.0, step=0.1, value=0.0, key=f"b_cost_{item_id}")
+                    if st.button("Create batch", key=f"b_create_{item_id}"):
+                        core.create_batch(item_id, cooked, total_y, portion, batch_exp, batch_cost)
+                        st.success("Batch created"); st.rerun()
+
+                    rows_b = core.list_batches(item_id)
+                    if not rows_b:
+                        st.caption("No batches yet.")
+                    else:
+                        for bid, cooked_at, total_y, portion_size, remaining, exp_b, state in rows_b:
+                            col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 1.5, 2])
+                            col1.write(f"Cooked {cooked_at}")
+                            col2.write(f"Remaining {remaining:.1f} base")
+                            col3.write(f"Portion {portion_size:.1f} base")
+                            col4.write(state)
+                            if col5.button("Use one portion", key=f"b_use_{bid}"):
+                                core.use_batch_portion(bid); st.success("Portion used"); st.rerun()
 
             with st.expander("Edit"):
                 new_name = st.text_input("Name", value=name, key=f"nm_{item_id}")
                 new_exp = st.date_input("Expiration (ignored while Stable & 0 on hand)",
-                                        value=min(parse_iso(exp), FAR_FUTURE),
-                                        max_value=FAR_FUTURE,
-                                        key=f"ex_{item_id}")
-                new_typ = st.text_input("Type", value=typ, key=f"tp_{item_id}")
+                                        value=min(core.parse_iso(exp), core.FAR_FUTURE),
+                                        max_value=core.FAR_FUTURE, key=f"ex_{item_id}")
+                new_typ = st.selectbox("Type", core.CATEGORIES, index=(core.CATEGORIES.index(typ) if typ in core.CATEGORIES else core.CATEGORIES.index("Other")), key=f"tp_{item_id}")
 
-                ui_unit_choice = st.selectbox("Display unit", UNITS, index=UNITS.index(unit_ui) if unit_ui in UNITS else 0, key=f"uiunit_{item_id}")
-                display_amount = from_base(base_amount, ui_unit_choice)
+                ui_unit_choice = st.selectbox("Display unit", core.UNITS, index=core.UNITS.index(unit_ui) if unit_ui in core.UNITS else 0, key=f"uiunit_{item_id}")
+                display_amount = core.from_base(base_amount, ui_unit_choice)
                 new_amount_ui = st.number_input("Amount", min_value=0.0, value=float(display_amount), step=0.1, key=f"am_{item_id}")
                 new_total = st.number_input("Total cost ₪", min_value=0.0, value=float(total_cost or 0.0), step=0.1, key=f"tt_{item_id}")
-                new_kind = st.selectbox("Kind", ["ingredient", "prepared"], index=["ingredient", "prepared"].index(kind) if kind in ["ingredient", "prepared"] else 0, key=f"kd_{item_id}")
+                new_kind = st.selectbox("Kind", ["ingredient", "prepared"], index=(0 if kind != "prepared" else 1), key=f"kd_{item_id}")
                 new_thaw_days = st.number_input("Days safe after thaw optional", min_value=0, step=1, value=int(thaw_days or 0), key=f"td_{item_id}")
                 new_recipe = st.text_area("Notes", value=recipe_note or "", key=f"rc_{item_id}")
+                auto_parse_edit = st.checkbox("Auto-parse quantity from name", value=True, key=f"ap_{item_id}")
 
-                # Delete controls
                 del_cols = st.columns([1, 1.6, 1])
                 confirm_del = del_cols[0].checkbox("Confirm delete", key=f"delc_{item_id}")
                 if del_cols[1].button("Delete item", key=f"del_{item_id}"):
                     if confirm_del:
-                        delete_item(item_id)
-                        st.warning("Item deleted.")
-                        st.rerun()
+                        core.delete_item(item_id); st.warning("Item deleted."); st.rerun()
                     else:
                         st.error("Please check 'Confirm delete' first.")
 
                 if st.button("Save", key=f"save_{item_id}"):
                     try:
-                        update_item(
+                        core.update_item(
                             item_id=item_id,
                             name=new_name.strip(),
                             expiration=new_exp.strftime("%Y-%m-%d"),
@@ -927,11 +402,36 @@ def inventory():
                             thaw_shelf_life_days=int(new_thaw_days) if new_thaw_days else None,
                             recipe_note=new_recipe.strip() if new_recipe else None,
                             stable_flag=bool(stable),
+                            auto_parse=auto_parse_edit
                         )
-                        st.success("Saved")
-                        st.rerun()
+                        st.success("Saved"); st.rerun()
                     except Exception as e:
                         st.error(str(e))
 
             if storage_state != "frozen" and thaw_days:
                 st.caption(f"After thaw consume within about {thaw_days} day(s)")
+
+
+# --------------------------- ENTRY POINTS -------------------------------------
+def inventory():
+    st.title("📦 Inventory")
+
+    if "user_id" not in st.session_state:
+        st.warning("Please login first")
+        st.stop()
+    user_id = int(st.session_state["user_id"])
+
+    tabs = st.tabs(["Browse", "Guide"])
+    with tabs[0]:
+        _browse_inventory(user_id)
+    with tabs[1]:
+        _inventory_guide()
+
+
+# entry points expected by your app router
+def app():
+    inventory()
+
+
+if __name__ == "__main__":
+    inventory()

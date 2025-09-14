@@ -1,11 +1,11 @@
-# CalendarView.py — Homepage with Time-of-Day Banner
+# CalendarView.py — Homepage with Time-of-Day Banner (no quick links, no week calendar)
 # Sections:
 #   - Hero banner (changes with hour)
+#   - Today at a glance (mini metrics)
+#   - Daily tip (contextual)
 #   - Notifications (today + next 3 days)
 #   - Expiring this week (top 5)
 #   - Recent activity (last 5)
-#   - Quick links
-#   - Optional week calendar (expander)
 
 from __future__ import annotations
 
@@ -15,12 +15,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 import db
-
-# Optional calendar widget
-try:
-    from streamlit_calendar import calendar as _calendar
-except Exception:
-    _calendar = None
 
 # Banner assets folder (commit images to: assets/banners/)
 ASSETS_DIR = Path(__file__).parent / "assets" / "banners"
@@ -37,7 +31,6 @@ def _parse_date(x: Any) -> date:
     try:
         return datetime.fromisoformat(str(x)).date()
     except Exception:
-        # Try common YYYY-MM-DD
         try:
             return datetime.strptime(str(x), "%Y-%m-%d").date()
         except Exception:
@@ -99,7 +92,6 @@ def _render_time_banner(user_name: str) -> None:
             st.image(data, use_container_width=True, caption=f"Welcome, {user_name}")
             st.markdown("</div>", unsafe_allow_html=True)
     else:
-        # If no asset found, fall back to a simple title
         st.title("🏠 Home")
 
 # --------------------------------------------------------------------------------
@@ -199,12 +191,68 @@ def _coach_counts(user_id: int) -> Tuple[List[dict], List[dict]]:
         return [], []
 
 # --------------------------------------------------------------------------------
+# Extras
+# --------------------------------------------------------------------------------
+def _cooking_streak(user_id: int) -> int:
+    """
+    Count consecutive days up to today with at least one 'used' event.
+    """
+    conn = db.get_connection(); c = conn.cursor()
+    try:
+        c.execute("SELECT ts FROM usage_log WHERE user_id=? AND LOWER(event_type)='used'", (user_id,))
+        rows = c.fetchall()
+    except Exception:
+        rows = []
+    finally:
+        conn.close()
+
+    days = set()
+    for (ts,) in rows or []:
+        try:
+            d = _parse_date(ts)
+            days.add(d)
+        except Exception:
+            continue
+
+    streak = 0
+    cur = date.today()
+    while cur in days:
+        streak += 1
+        cur = cur - timedelta(days=1)
+    return streak
+
+def _render_today_glance(user_id: int, inv_rows: List[tuple]) -> None:
+    st.subheader("📌 Today at a glance")
+    critical, urgent = _coach_counts(user_id)
+    inv_in_stock = sum(1 for *_, qty, _unit in inv_rows if (float(qty or 0) > 0))
+    streak = _cooking_streak(user_id)
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: st.metric("Expiring today", len(critical))
+    with c2: st.metric("Due in 3d", len(urgent))
+    with c3: st.metric("Items in stock", inv_in_stock)
+    with c4: st.metric("Cooking streak", f"{streak}d")
+
+def _render_daily_tip(user_id: int) -> None:
+    critical, urgent = _coach_counts(user_id)
+    streak = _cooking_streak(user_id)
+
+    if critical:
+        tip = "You’ve got items expiring today — consider freezing or cooking a rescue recipe."
+    elif urgent:
+        tip = "A few items are due in ~3 days. Plan one recipe now to use them up."
+    elif streak >= 3:
+        tip = f"Nice streak! You’ve cooked {streak} day(s) in a row. Keep it going 🎉"
+    else:
+        tip = "Try **AI Create** to draft tonight’s dinner from your pantry."
+
+    st.info(tip)
+
+# --------------------------------------------------------------------------------
 # Minimal sections
 # --------------------------------------------------------------------------------
 def _render_header(user_name: str) -> None:
-    # Banner first; if banner is missing, title is shown in _render_time_banner
     _render_time_banner(user_name)
-    # Subtle date line
     st.caption(f"Today is {date.today():%A, %d %B %Y}.")
 
 def _render_notifications(user_id: int) -> None:
@@ -277,36 +325,6 @@ def _render_activity(user_id: int) -> None:
         qty_txt = f"{qty:g}".rstrip(".")
         st.write(f"{emoji} {ts} — **{nm}** · {ev} · {qty_txt}")
 
-def _render_quick_links() -> None:
-    st.subheader("🔗 Quick links")
-    cols = st.columns(4)
-    cols[0].markdown("**📦 Stock**  \nOpen your inventory.")
-    cols[1].markdown("**🛒 Shopping**  \nReview store carts.")
-    cols[2].markdown("**🧠 Coach**  \nHandle at-risk items.")
-    cols[3].markdown("**📊 Stats**  \nSee the dashboard.")
-
-def _render_calendar(rows: List[tuple]) -> None:
-    with st.expander("🗓 Week calendar"):
-        if _calendar is None:
-            st.info("Calendar widget unavailable. Install `streamlit-calendar` to enable the week view.")
-            return
-        events = []
-        for _, name, exp, typ, qty, unit in rows:
-            try:
-                if float(qty or 0) <= 0:
-                    continue
-            except Exception:
-                continue
-            d = _parse_date(exp)
-            events.append({"title": f"{name} ({typ})", "start": d.isoformat(), "end": d.isoformat(), "allDay": True})
-        _calendar(options={
-            "initialView": "dayGridWeek",
-            "height": 420,
-            "events": events,
-            "headerToolbar": {"left": "", "center": "", "right": ""},
-            "dayMaxEvents": True,
-        })
-
 # --------------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------------
@@ -323,15 +341,17 @@ def calendar_view() -> None:
     # Header + banner
     _render_header(user_name)
 
+    # Small extras
+    _render_today_glance(user_id, rows)
+    _render_daily_tip(user_id)
+
     # Essentials
     _render_notifications(user_id)
     st.divider()
     _render_upcoming_week(rows)
     st.divider()
     _render_activity(user_id)
-    st.divider()
-    _render_quick_links()
-    _render_calendar(rows)
+    # Quick links and week calendar intentionally removed
 
 # Compatibility aliases
 def render():
