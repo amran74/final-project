@@ -4,9 +4,8 @@ from __future__ import annotations
 import csv
 import io
 import re
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, Tuple, List
 
 from db import get_connection, create_tables, _today_keys, _compute_step_count
 
@@ -22,7 +21,32 @@ CATEGORIES = [
     "Frozen", "Snacks", "Beverages", "Household", "Other"
 ]
 
+# far-future placeholder for "stable + zero" items
 FAR_FUTURE = date(2099, 12, 31)
+
+# ---------------------------------
+# Default safe days after thaw if item-specific value not set
+# ---------------------------------
+DEFAULT_THAW_DAYS = {
+    "Meat": 2,
+    "Fish": 1,
+    "Dairy": 3,
+    "Bakery": 3,
+    "Vegetable": 3,
+    "Fruit": 2,
+    "Prepared": 3,
+    "Pantry": None,
+    "Beverages": None,
+    "Snacks": None,
+    "Frozen": 3,
+    "Household": None,
+    "Other": 2,
+}
+
+def default_thaw_days(food_type: str) -> Optional[int]:
+    if not food_type:
+        return None
+    return DEFAULT_THAW_DAYS.get(str(food_type).title(), None)
 
 # ---------------------------------
 # Migrations (idempotent)
@@ -57,7 +81,10 @@ def run_migrations():
             try: c.execute(stmt); conn.commit()
             except Exception: pass
             continue
-        target_col = stmt.split(" ADD COLUMN ")[1].split(" ")[0]
+        try:
+            target_col = stmt.split(" ADD COLUMN ")[1].split(" ")[0]
+        except Exception:
+            continue
         if target_col not in cols:
             try: c.execute(stmt); conn.commit(); cols.add(target_col)
             except Exception: pass
@@ -77,7 +104,8 @@ def iso_today() -> str:
 
 def to_base(amount: float, unit: str) -> Tuple[float, str]:
     unit = (unit or "pcs").lower()
-    if unit not in BASE_FOR: return amount, "pcs"
+    if unit not in BASE_FOR:
+        return float(amount), "pcs"
     return float(amount) * MULT_TO_BASE[unit], BASE_FOR[unit]
 
 def from_base(amount_base: float, ui_unit: str) -> float:
@@ -115,11 +143,26 @@ def is_stable_zero(stable: bool, base_amount: float) -> bool:
     except Exception:
         return False
 
+def ui_hint_price_per_100(base_unit: str, price_per_base: float) -> Tuple[str, float]:
+    ppb = float(price_per_base or 0.0)
+    if base_unit == "g":  return "₪/100 g", ppb * 100.0
+    if base_unit == "ml": return "₪/100 ml", ppb * 100.0
+    return "₪/pcs", ppb
+
+def amount_display(base_amount: float, base_unit: str) -> str:
+    base_amount = float(base_amount or 0.0)
+    bu = base_unit or "pcs"
+    if bu == "g":
+        if base_amount >= 1000: return f"{base_amount/1000:.1f} kg"
+        return f"{base_amount:.0f} g"
+    if bu == "ml":
+        if base_amount >= 1000: return f"{base_amount/1000:.1f} l"
+        return f"{base_amount:.0f} ml"
+    return f"{base_amount:.0f} pcs"
+
 # ---------------------------------
 # Name→amount auto-parser
 # ---------------------------------
-# Supported patterns at end of name:
-#   "12 pack", "12pcs", "12 pc", "x12", "12x", "500g", "1kg", "2l", "300ml"
 _NAME_QTY_PATTERNS = [
     r"(.*)\b(\d+)\s*(?:pack|pcs?|x)\s*$",
     r"(.*)\b(\d+)\s*[xX]\s*$",
@@ -133,35 +176,97 @@ def normalize_name_and_amount(name: str, amount_ui: float, unit_ui: str) -> Tupl
         return name, amount_ui, unit_ui
     for pat in _NAME_QTY_PATTERNS:
         m = re.match(pat, base_name, flags=re.IGNORECASE)
-        if not m: 
+        if not m:
             continue
         item = m.group(1).strip()
         val = m.group(2)
-        # unit group may exist
         unit = m.group(3).lower() if len(m.groups()) >= 3 and m.group(3) else None
         try:
             qty = float(val)
         except Exception:
             continue
-        if unit in ("mg","g","kg","ml","l"):
-            # treat this as amount/unit
+        if unit in ("mg", "g", "kg", "ml", "l"):
             return item, qty, unit
-        # otherwise it's pieces
         return item, qty, "pcs"
     return base_name, amount_ui, unit_ui
 
 # ---------------------------------
-# Expiration with frozen pause
+# Expiration with frozen pause + post-thaw cap
 # ---------------------------------
-def effective_expiration(expiration: str, storage_state: str, frozen_at: Optional[str], thawed_at: Optional[str], frozen_days_accum: int) -> date:
+def effective_expiration(
+    expiration: str,
+    storage_state: str,
+    frozen_at: Optional[str],
+    thawed_at: Optional[str],
+    frozen_days_accum: int,
+    thaw_shelf_life_days: Optional[int] = None,
+) -> date:
+    """
+    Effective expiration:
+      - Pause clock while frozen (accumulated + current freeze span).
+      - After thaw, if thaw_shelf_life_days > 0, cap at thawed_at + thaw_shelf_life_days.
+    """
     base_exp = parse_iso(expiration)
+
     paused_days = int(frozen_days_accum or 0)
     if storage_state == "frozen" and frozen_at:
         try:
             paused_days += (today() - parse_iso(frozen_at)).days
         except Exception:
             pass
-    return base_exp + timedelta(days=max(0, paused_days))
+
+    exp_with_pause = base_exp + timedelta(days=max(0, paused_days))
+
+    if thawed_at and thaw_shelf_life_days and int(thaw_shelf_life_days) > 0:
+        try:
+            thaw_cap = parse_iso(thawed_at) + timedelta(days=int(thaw_shelf_life_days))
+            return min(exp_with_pause, thaw_cap)
+        except Exception:
+            return exp_with_pause
+
+    return exp_with_pause
+
+def effective_expiration_explain(
+    expiration: str,
+    storage_state: str,
+    frozen_at: Optional[str],
+    thawed_at: Optional[str],
+    frozen_days_accum: int,
+    thaw_shelf_life_days: Optional[int] = None,
+):
+    """
+    Breakdown for UI:
+      returns (effective_date, base_exp, total_paused_days, thaw_cap_date_or_None, remaining_after_thaw_days)
+    remaining_after_thaw_days = days left once thawed (after applying any post-thaw cap)
+    """
+    base_exp = parse_iso(expiration)
+
+    paused_days = int(frozen_days_accum or 0)
+    if storage_state == "frozen" and frozen_at:
+        try:
+            paused_days += (today() - parse_iso(frozen_at)).days
+        except Exception:
+            pass
+
+    exp_with_pause = base_exp + timedelta(days=max(0, paused_days))
+
+    thaw_cap = None
+    if thawed_at and thaw_shelf_life_days and int(thaw_shelf_life_days) > 0:
+        try:
+            thaw_cap = parse_iso(thawed_at) + timedelta(days=int(thaw_shelf_life_days))
+        except Exception:
+            thaw_cap = None
+
+    eff = min(exp_with_pause, thaw_cap) if thaw_cap else exp_with_pause
+
+    remaining_after_thaw = None
+    if thawed_at:
+        try:
+            remaining_after_thaw = max(0, (eff - parse_iso(thawed_at)).days)
+        except Exception:
+            remaining_after_thaw = None
+
+    return eff, base_exp, paused_days, thaw_cap, remaining_after_thaw
 
 def status_badge(eff_exp: date, storage_state: str) -> Tuple[str, str]:
     if storage_state == "frozen":
@@ -221,7 +326,6 @@ def update_item(item_id: int, name: str, expiration: str, food_type: str,
     base_amount, base_unit = to_base(amt, u)
     price_per_base = compute_price_per_base(total_cost, base_amount)
     conn = get_connection(); c = conn.cursor()
-    # figure stable
     if stable_flag is None:
         c.execute("SELECT COALESCE(stable,0) FROM inventory WHERE id=?", (item_id,))
         current_stable = bool((c.fetchone() or [0])[0])
@@ -235,7 +339,6 @@ def update_item(item_id: int, name: str, expiration: str, food_type: str,
         WHERE id=?
     """, (nm, exp_to_store, food_type, amt, u, total_cost, price_per_base,
           base_amount, base_unit, kind, thaw_shelf_life_days, recipe_note, item_id))
-    # auto-delete depleted non-stable
     if float(base_amount or 0.0) <= 0.0 and not current_stable:
         c.execute("DELETE FROM inventory WHERE id=?", (item_id,))
     conn.commit(); conn.close()
@@ -268,7 +371,6 @@ def use_quantity(item_id: int, qty_ui: float, ui_unit: str) -> Tuple[bool, str]:
     """, (new_amount, int(step_inc), item_id))
     conn.commit(); conn.close()
     _log_usage(user_id, item_id, "used", qty_ui, (unit_row or ui_unit), step_inc, 0.0)
-    # auto delete if depleted and not stable
     if new_amount <= 0 and int(stable_flag or 0) == 0:
         delete_item(item_id)
         return True, f"Used {qty_ui} {ui_unit}. Item removed (depleted)."
@@ -393,28 +495,42 @@ def cleanup_depleted_items(user_id: int) -> int:
 def cleanup_expired_items(user_id: int) -> int:
     conn = get_connection(); c = conn.cursor()
     c.execute("""
-        SELECT id, user_id, base_amount, price_per_base, unit, price_per_unit, base_unit, name,
+        SELECT id, user_id, base_amount, price_per_base, unit, price_per_unit, base_unit,
+               name, type,
                expiration, storage_state, frozen_at, thawed_at, COALESCE(frozen_days_accum,0),
-               COALESCE(stable,0)
+               COALESCE(stable,0), thaw_shelf_life_days
         FROM inventory
         WHERE user_id=?
     """, (user_id,))
     rows = c.fetchall()
     removed = 0
     ts, month_key = _today_keys()
-    for (item_id, uid, base_amt, ppb, unit_row, ppu_legacy, base_unit, nm,
-         expiration, storage_state, frozen_at, thawed_at, frozen_days_accum, stable_flag) in rows:
+    for (item_id, uid, base_amt, ppb, unit_row, ppu_legacy, base_unit,
+         nm, typ,
+         expiration, storage_state, frozen_at, thawed_at, frozen_days_accum,
+         stable_flag, thaw_days) in rows:
+
         base_amt = float(base_amt or 0.0)
-        if base_amt <= 0: continue
-        eff_exp = effective_expiration(expiration, storage_state, frozen_at, thawed_at, int(frozen_days_accum or 0))
-        if eff_exp > today(): continue
+        if base_amt <= 0:
+            continue
+
+        thaw_eff = int(thaw_days) if thaw_days else default_thaw_days(typ)
+
+        eff_exp = effective_expiration(
+            expiration, storage_state, frozen_at, thawed_at, int(frozen_days_accum or 0), thaw_eff
+        )
+        if eff_exp > today():
+            continue
+
         price_pb = effective_price_per_base(ppb, ppu_legacy, unit_row, base_unit)
         loss = round(base_amt * float(price_pb or 0.0), 2)
         step_inc = _compute_step_count(base_amt, base_unit or "pcs")
+
         c.execute("""
           INSERT INTO usage_log (user_id, item_id, event_type, quantity, unit, step_count, value_shekel, ts, month_key)
           VALUES (?, ?, 'expired', ?, ?, ?, ?, ?, ?)
         """, (uid, item_id, base_amt, (base_unit or "pcs"), int(step_inc), float(loss), ts, month_key))
+
         if int(stable_flag or 0) == 0:
             c.execute("DELETE FROM inventory WHERE id=?", (item_id,))
             removed += 1
@@ -438,7 +554,8 @@ def export_csv(rows: List[tuple]) -> bytes:
         "total_cost","price_per_base","storage_state","frozen_at","thawed_at","frozen_days_accum",
         "thaw_shelf_life_days","recipe_note"
     ])
-    for r in rows: writer.writerow(list(r))
+    for r in rows:
+        writer.writerow(list(r))
     return out.getvalue().encode("utf-8")
 
 # ---------------------------------
@@ -450,10 +567,13 @@ def effective_expiration_display(expiration: str,
                                  thawed_at: Optional[str],
                                  frozen_days_accum: int,
                                  stable: bool,
-                                 base_amount: float):
+                                 base_amount: float,
+                                 thaw_shelf_life_days: Optional[int] = None):
     if is_stable_zero(stable, base_amount):
         return FAR_FUTURE, "Not stocked", "#8E8E8E", True
-    eff = effective_expiration(expiration, storage_state, frozen_at, thawed_at, frozen_days_accum)
+    eff = effective_expiration(
+        expiration, storage_state, frozen_at, thawed_at, frozen_days_accum, thaw_shelf_life_days
+    )
     txt, color = status_badge(eff, storage_state)
     return eff, txt, color, False
 
@@ -494,6 +614,18 @@ def add_or_update_recipe_component(prepared_item_id: int, ingredient_item_id: in
 def delete_recipe_component(component_id: int):
     conn = get_connection(); conn.execute("DELETE FROM recipe_components WHERE id=?", (component_id,)); conn.commit(); conn.close()
 
+def recipe_cost(prepared_item_id: int) -> float:
+    conn = get_connection(); c = conn.cursor()
+    c.execute("""
+      SELECT SUM(rc.quantity_base * i.price_per_base)
+      FROM recipe_components rc
+      JOIN recipes r ON r.id = rc.recipe_id
+      JOIN inventory i ON i.id = rc.ingredient_item_id
+      WHERE r.prepared_item_id=?
+    """, (prepared_item_id,))
+    v = c.fetchone()[0]
+    conn.close(); return float(v or 0.0)
+
 def push_recipe_cost_to_item(prepared_item_id: int, total_cost: float, expected_yield_base: float):
     price_per_base = (total_cost / expected_yield_base) if expected_yield_base > 0 else 0.0
     conn = get_connection(); conn.execute("UPDATE inventory SET total_cost=?, price_per_base=? WHERE id=?", (total_cost, price_per_base, prepared_item_id))
@@ -524,7 +656,8 @@ def use_batch_portion(batch_id: int):
     conn = get_connection(); c = conn.cursor()
     c.execute("SELECT remaining_base, portion_size_base FROM batches WHERE id=?", (batch_id,))
     r = c.fetchone()
-    if not r: conn.close(); return
+    if not r:
+        conn.close(); return
     remaining, portion = r
     new_remaining = max(0.0, float(remaining) - float(portion or 0.0))
     c.execute("UPDATE batches SET remaining_base=? WHERE id=?", (new_remaining, batch_id))

@@ -1,367 +1,739 @@
-# dashboard.py — Executive BI Dashboard (Crown Jewel, no deadweight)
-# Polished, interactive, and fast. Tabs, drill-downs, forecasting, simulator, exports.
+# dashboard.py
+# Executive Dashboard with top-tab navigation, AI insights, and improved at-risk logic.
+# Router-friendly: exposes dashboard() and app().
 
 from __future__ import annotations
 
 import math
-from datetime import date, datetime
-from typing import Tuple, Dict, Any
+from datetime import date, datetime, timedelta
+from typing import Optional, Tuple
 
-import numpy as np
 import pandas as pd
-import altair as alt
 import streamlit as st
+from db import get_connection
+import sys as _sys
 
-from db import get_connection, get_monthly_summary
+# Optional OpenAI import (graceful fallback)
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
-# ------------------------------------------------------------------------------
-# Page config
-# ------------------------------------------------------------------------------
-st.set_page_config(page_title="📊 Executive Dashboard", page_icon="📊", layout="wide")
+# -----------------------------------------------------------------------------
+# Router compatibility (some loaders import Dashboard, others dashboard)
+# -----------------------------------------------------------------------------
+_mod = _sys.modules.get(__name__)
+if _mod is not None:
+    _sys.modules.setdefault("Dashboard", _mod)
+    _sys.modules.setdefault("dashboard", _mod)
 
-PRIMARY_OK = "#14b8a6"   # teal (used/good)
-PRIMARY_BAD = "#ef4444"  # red (expired/bad)
-PRIMARY_WARN = "#f59e0b" # amber (risk/warn)
+st.set_page_config(page_title="Dashboard", page_icon="📊", layout="wide")
 
-# ------------------------------------------------------------------------------
-# Caching & Data Access
-# ------------------------------------------------------------------------------
-@st.cache_data(show_spinner=False)
-def _load_history(user_id: int) -> pd.DataFrame:
-    """
-    usage_log JOIN inventory -> tidy dataframe
-    Columns: ts, month, event_type, step_count, name, type, price_per_base, value
-    """
-    conn = get_connection()
-    q = """
-      SELECT u.ts, u.event_type, u.step_count, i.name, i.type, COALESCE(i.price_per_base, 0.0) AS price_per_base
-        FROM usage_log u
-        JOIN inventory i ON i.id = u.item_id
-       WHERE u.user_id=?
-    """
-    df = pd.read_sql_query(q, conn, params=(user_id,))
-    conn.close()
-    if df.empty:
-        return df
-    # Normalize
-    df["ts"] = pd.to_datetime(df["ts"], errors="coerce").fillna(pd.Timestamp.utcnow())
-    df["month"] = df["ts"].dt.to_period("M").dt.to_timestamp()
-    df["event_type"] = df["event_type"].str.lower().str.strip()
-    df["step_count"] = pd.to_numeric(df["step_count"], errors="coerce").fillna(0).astype(float)
-    df["value"] = df["step_count"] * pd.to_numeric(df["price_per_base"], errors="coerce").fillna(0.0)
-    return df
+TODAY = date.today()
 
-@st.cache_data(show_spinner=False)
-def _kpis(user_id: int) -> Tuple[int, int, int, float]:
-    conn = get_connection(); c = conn.cursor()
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
+def _read_sql(sql: str, params: Tuple = ()) -> pd.DataFrame:
+    con = get_connection()
     try:
-        c.execute("SELECT COUNT(*) FROM inventory WHERE user_id=?", (user_id,))
-        total_items = int(c.fetchone()[0] or 0)
+        return pd.read_sql_query(sql, con, params=params)
     finally:
-        conn.close()
-    ms = get_monthly_summary(user_id)
-    used = int(ms.get("used_steps", 0))
-    expired = int(ms.get("expired_steps", 0))
-    lost = float(ms.get("money_lost", 0.0))
-    return total_items, used, expired, lost
+        con.close()
 
-@st.cache_data(show_spinner=False)
-def _categories_for_user(user_id: int) -> pd.DataFrame:
-    conn = get_connection()
-    df = pd.read_sql_query("SELECT DISTINCT COALESCE(type,'Other') AS type FROM inventory WHERE user_id=?", conn, params=(user_id,))
-    conn.close()
+def _days_until(iso_str: Optional[str]) -> Optional[int]:
+    if not iso_str:
+        return None
+    try:
+        d = datetime.fromisoformat(iso_str).date()
+        return (d - TODAY).days
+    except Exception:
+        return None
+
+def _money(x: Optional[float]) -> str:
+    try:
+        return f"₪{float(x or 0):,.2f}"
+    except Exception:
+        return "₪0.00"
+
+def _pretty_money(x: float) -> str:
+    return f"₪{x:,.0f}" if x >= 1000 else f"₪{x:,.2f}"
+
+def _step_for(base_unit: str) -> float:
+    return 100.0 if (base_unit or "").lower() in ("g", "ml") else 1.0
+
+def _friendly_qty(amount: float, unit: str) -> Tuple[float, str]:
+    u = (unit or "pcs").lower()
+    if u == "g":
+        return (amount / 1000.0, "kg") if amount >= 1000 else (amount, "g")
+    if u == "ml":
+        return (amount / 1000.0, "l") if amount >= 1000 else (amount, "ml")
+    return amount, (unit or "pcs")
+
+def _likely_waste_value(on_hand_base: float,
+                        days_until: Optional[int],
+                        avg_daily_base: float,
+                        price_per_base: float) -> float:
+    # No expiry means we can't claim imminent waste due to date.
+    if days_until is None or days_until < 0:
+        return 0.0
+    if avg_daily_base <= 0:
+        return on_hand_base * max(price_per_base, 0.0)
+    usable_before_expiry = avg_daily_base * max(days_until, 0)
+    wasted_base = max(on_hand_base - usable_before_expiry, 0.0)
+    return wasted_base * max(price_per_base, 0.0)
+
+def _model_name() -> str:
+    try:
+        return st.secrets.get("RECIPE_AI_MODEL", "gpt-4o-mini")
+    except Exception:
+        return "gpt-4o-mini"
+
+# -----------------------------------------------------------------------------
+# Auth / user
+# -----------------------------------------------------------------------------
+def _resolve_user_id() -> Optional[int]:
+    if "user_id" in st.session_state:
+        return int(st.session_state["user_id"])
+
+    st.warning("No active login. Pick a user to view data (read-only).")
+    try:
+        users = _read_sql("SELECT id, username FROM users ORDER BY username")
+    except Exception:
+        users = pd.DataFrame(columns=["id", "username"])
+
+    if users.empty:
+        st.info("No users found. Go to Login and create a user first.")
+        return None
+
+    pick = st.selectbox(
+        "View as user",
+        list(users.itertuples(index=False)),
+        format_func=lambda r: f"{r.username} (id {r.id})",
+        key="dash_viewas",
+    )
+    if st.button("View"):
+        st.session_state["user_id"] = int(pick.id)
+        st.session_state["view_only"] = True
+        st.rerun()
+    st.stop()
+
+# -----------------------------------------------------------------------------
+# Live data loaders (no caching)
+# -----------------------------------------------------------------------------
+def load_inventory_snapshot(user_id: int) -> pd.DataFrame:
+    df = _read_sql(
+        """
+        SELECT id, name, type, base_unit,
+               COALESCE(base_amount,0.0)    AS base_amount,
+               COALESCE(price_per_base,0.0) AS price_per_base,
+               COALESCE(total_cost,0.0)     AS total_cost,
+               COALESCE(expiration,'')      AS expiration,
+               COALESCE(stable,1)           AS stable
+          FROM inventory
+         WHERE user_id=?
+        """,
+        (user_id,),
+    )
+    df["value"] = df["base_amount"] * df["price_per_base"]
+    df["days_until"] = df["expiration"].apply(_days_until)
     return df
 
-# ------------------------------------------------------------------------------
-# Analytics helpers
-# ------------------------------------------------------------------------------
-def _month_deltas(hist: pd.DataFrame) -> Tuple[int, int]:
-    if hist.empty:
-        return 0, 0
-    # current month
-    cm = pd.Timestamp(date.today().replace(day=1))
-    lm = (cm - pd.DateOffset(months=1)).to_period("M").to_timestamp()
-    cur = hist[hist["month"] == cm]
-    last = hist[hist["month"] == lm]
-    used_delta = int(cur[cur["event_type"] == "used"]["step_count"].sum() - last[last["event_type"] == "used"]["step_count"].sum())
-    exp_delta = int(cur[cur["event_type"] == "expired"]["step_count"].sum() - last[last["event_type"] == "expired"]["step_count"].sum())
-    return used_delta, exp_delta
-
-def _insights(used_this: int, expired_this: int, lost_this: float, used_delta: int, exp_delta: int, hist: pd.DataFrame) -> Dict[str, Any]:
-    lines = []
-    if exp_delta > 0:
-        lines.append(f"Waste increased by {exp_delta} vs last month.")
-    elif exp_delta < 0:
-        lines.append(f"Waste decreased by {abs(exp_delta)} vs last month.")
-    if used_delta > 0:
-        lines.append(f"Usage improved by {used_delta} vs last month.")
-    elif used_delta < 0:
-        lines.append(f"Usage fell by {abs(used_delta)} vs last month.")
-    if lost_this > 0:
-        lines.append(f"Money lost this month: ₪{lost_this:.2f}.")
-    if used_this >= expired_this:
-        lines.append("You used more than you wasted this month.")
-    # Worst category this month by money
-    if not hist.empty:
-        cm = pd.Timestamp(date.today().replace(day=1))
-        cm_df = hist[(hist["month"] == cm) & (hist["event_type"] == "expired")]
-        if not cm_df.empty:
-            by_cat = cm_df.groupby("type")["value"].sum().sort_values(ascending=False)
-            top_cat, top_val = by_cat.index[0], float(by_cat.iloc[0])
-            lines.append(f"Highest waste category: {top_cat} (₪{top_val:.2f}).")
-    if not lines:
-        lines.append("No notable changes detected.")
-    return {"bullets": lines}
-
-def _forecast_next_month(hist: pd.DataFrame) -> Tuple[float, float]:
-    """
-    Simple linear regression over monthly expired value to forecast next month.
-    Returns (yhat, r2). Requires >= 3 points.
-    """
-    if hist.empty:
-        return 0.0, 0.0
-    monthly = hist[hist["event_type"] == "expired"].groupby("month")["value"].sum().reset_index()
-    if len(monthly) < 3:
-        return float(monthly["value"].iloc[-1] if len(monthly) else 0.0), 0.0
-    monthly = monthly.sort_values("month")
-    x = np.arange(len(monthly), dtype=float)
-    y = monthly["value"].to_numpy(dtype=float)
-    # Linear regression
-    A = np.vstack([x, np.ones_like(x)]).T
-    coef, resid, _, _ = np.linalg.lstsq(A, y, rcond=None)
-    m, b = coef
-    yhat_next = m * (len(monthly)) + b
-    # R^2
-    yhat = m * x + b
-    ss_res = np.sum((y - yhat) ** 2)
-    ss_tot = np.sum((y - np.mean(y)) ** 2) or 1.0
-    r2 = 1 - ss_res / ss_tot
-    return max(0.0, float(yhat_next)), float(r2)
-
-# ------------------------------------------------------------------------------
-# Charts
-# ------------------------------------------------------------------------------
-def _trend_chart(trend_df: pd.DataFrame) -> alt.Chart:
-    base = alt.Chart(trend_df).encode(
-        x=alt.X("month:T", title=None),
-        y=alt.Y("step_count:Q", title="Units"),
-        color=alt.Color("event_type:N", scale=alt.Scale(domain=["used", "expired"], range=[PRIMARY_OK, PRIMARY_BAD])),
-        tooltip=["month:T", "event_type:N", alt.Tooltip("step_count:Q", title="Units"), alt.Tooltip("value:Q", title="Value")]
-    )
-    return (base.mark_line(point=True)).properties(height=320)
-
-def _category_chart(cat_df: pd.DataFrame) -> alt.Chart:
-    return alt.Chart(cat_df).mark_bar().encode(
-        y=alt.Y("type:N", sort="-x", title=None),
-        x=alt.X("step_count:Q", title="Units"),
-        color=alt.Color("event_type:N", scale=alt.Scale(domain=["used", "expired"], range=[PRIMARY_OK, PRIMARY_BAD])),
-        tooltip=["type:N", "event_type:N", alt.Tooltip("step_count:Q", title="Units"), alt.Tooltip("value:Q", title="Value")]
-    ).properties(height=360)
-
-def _pareto_chart(pareto_df: pd.DataFrame, top_n: int = 30) -> alt.Chart:
-    data = pareto_df.head(top_n)
-    bars = alt.Chart(data).mark_bar().encode(
-        x=alt.X("name:N", sort="-y", title=None),
-        y=alt.Y("value:Q", title="Waste (₪)"),
-        tooltip=["name:N", alt.Tooltip("value:Q", title="Waste (₪)")]
-    ).properties(height=280)
-    line = alt.Chart(data).mark_line(color=PRIMARY_WARN).encode(
-        x="name:N",
-        y=alt.Y("cumshare:Q", axis=alt.Axis(format='%'), title="Cumulative share"),
-    )
-    return alt.layer(bars, line).resolve_scale(y='independent')
-
-# ------------------------------------------------------------------------------
-# Tabs Rendering
-# ------------------------------------------------------------------------------
-def _tab_overview(user_id: int, hist: pd.DataFrame):
-    total_items, used, expired, lost = _kpis(user_id)
-    used_delta, exp_delta = _month_deltas(hist)
-
-    st.subheader("Overview")
-
-    # KPI row
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("📦 Items tracked", total_items)
-    c2.metric("✅ Used (month)", used, delta=used_delta)
-    c3.metric("⛔ Expired (month)", expired, delta=exp_delta)
-    c4.metric("💸 Money lost (month)", f"₪{lost:.2f}")
-    c5.metric("💡 Savings potential (20%)", f"₪{lost*0.20:.2f}")
-
-    st.markdown("---")
-
-    # Insights
-    insights = _insights(used, expired, lost, used_delta, exp_delta, hist)
-    st.subheader("Key insights")
-    for bullet in insights["bullets"]:
-        st.write(f"• {bullet}")
-
-def _tab_trends(hist: pd.DataFrame):
-    st.subheader("Trends")
-
-    # Filters
-    min_d, max_d = hist["ts"].min().date(), hist["ts"].max().date()
-    col_a, col_b = st.columns([2, 3])
-    with col_a:
-        start, end = st.date_input("Date range", (min_d, max_d), min_value=min_d, max_value=max_d)
-    with col_b:
-        ev = st.multiselect("Event type", ["used", "expired"], default=["used", "expired"])
-
-    mask = (hist["ts"].dt.date >= start) & (hist["ts"].dt.date <= end) & (hist["event_type"].isin(ev))
-    f = hist.loc[mask].copy()
-
-    trend = f.groupby(["month", "event_type"]).agg(step_count=("step_count", "sum"), value=("value", "sum")).reset_index()
-    st.altair_chart(_trend_chart(trend), use_container_width=True)
-
-    # Drill-down table for the selected period
-    with st.expander("Details (filtered period)"):
-        day_summary = f.groupby([f["ts"].dt.date.rename("day"), "event_type"]).agg(
-            units=("step_count", "sum"), value=("value", "sum")
-        ).reset_index().sort_values(["day", "event_type"])
-        st.dataframe(day_summary, use_container_width=True)
-
-def _tab_categories(hist: pd.DataFrame):
-    st.subheader("Categories")
-
-    cat = hist.groupby(["type", "event_type"]).agg(step_count=("step_count", "sum"), value=("value", "sum")).reset_index()
-    st.altair_chart(_category_chart(cat), use_container_width=True)
-
-    # Drill-down by category
-    categories = sorted(cat["type"].unique().tolist())
-    sel = st.selectbox("Drill-down category", categories)
-    drill = hist[hist["type"] == sel].copy()
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown(f"**Top used in {sel}**")
-        used_items = drill[drill["event_type"] == "used"].groupby("name").agg(units=("step_count", "sum")).reset_index()
-        st.dataframe(used_items.sort_values("units", ascending=False).head(10), use_container_width=True)
-    with col2:
-        st.markdown(f"**Top wasted in {sel}**")
-        expired_items = drill[drill["event_type"] == "expired"].groupby("name").agg(
-            units=("step_count", "sum"), value=("value", "sum")
-        ).reset_index()
-        st.dataframe(expired_items.sort_values(["value", "units"], ascending=[False, False]).head(10), use_container_width=True)
-
-def _tab_pareto(hist: pd.DataFrame):
-    st.subheader("Pareto (80/20)")
-
-    waste = hist[hist["event_type"] == "expired"].groupby("name").agg(value=("value", "sum")).reset_index()
-    if waste.empty:
-        st.info("No waste recorded.")
-        return
-    waste = waste.sort_values("value", ascending=False)
-    waste["cumshare"] = waste["value"].cumsum() / waste["value"].sum()
-
-    st.altair_chart(_pareto_chart(waste, top_n=30), use_container_width=True)
-
-    with st.expander("Top drivers table"):
-        st.dataframe(waste.head(50), use_container_width=True)
-
-    # Item detail drilldown
-    items = waste["name"].tolist()
-    chosen = st.selectbox("Inspect item history", items[:50])
-    d = hist[hist["name"] == chosen].copy()
-    if d.empty:
-        st.write("No history.")
-        return
-    # Monthly line for this item
-    line_df = d.groupby(["month", "event_type"]).agg(units=("step_count", "sum"), value=("value", "sum")).reset_index()
-    chart = alt.Chart(line_df).mark_line(point=True).encode(
-        x="month:T",
-        y="units:Q",
-        color=alt.Color("event_type:N", scale=alt.Scale(domain=["used", "expired"], range=[PRIMARY_OK, PRIMARY_BAD])),
-        tooltip=["month:T", "event_type:N", "units:Q", "value:Q"],
-    ).properties(height=280)
-    st.altair_chart(chart, use_container_width=True)
-
-def _tab_forecast(hist: pd.DataFrame):
-    st.subheader("Forecast (next month)")
-
-    monthly = hist.groupby(["month", "event_type"]).agg(value=("value", "sum")).reset_index()
-    base = monthly[monthly["event_type"] == "expired"].copy()
-    base = base.sort_values("month")
-    if base.empty:
-        st.info("Not enough data to forecast.")
-        return
-
-    yhat, r2 = _forecast_next_month(hist)
-    cm = pd.Timestamp(date.today().replace(day=1))
-    next_m = (cm + pd.DateOffset(months=1)).to_period("M").to_timestamp()
-
-    # Chart historical + forecast point
-    base["label"] = "History"
-    forecast_df = pd.DataFrame({"month": [next_m], "value": [max(0.0, yhat)], "label": ["Forecast"]})
-    plot_df = pd.concat([base[["month", "value", "label"]], forecast_df], ignore_index=True)
-
-    chart = alt.Chart(plot_df).mark_line(point=True).encode(
-        x="month:T",
-        y=alt.Y("value:Q", title="Waste (₪)"),
-        color=alt.Color("label:N", scale=alt.Scale(domain=["History", "Forecast"], range=[PRIMARY_BAD, PRIMARY_WARN])),
-        tooltip=["month:T", "label:N", alt.Tooltip("value:Q", title="Waste (₪)")]
-    ).properties(height=320)
-    st.altair_chart(chart, use_container_width=True)
-
-    st.caption(f"Forecast R² (fit quality): {r2:.2f} — simple linear model.")
-
-def _tab_simulator(lost_month: float):
-    st.subheader("Savings Simulator")
-    percent = st.slider("Reduce waste by (%)", 0, 100, 20, step=5)
-    monthly_save = lost_month * (percent / 100)
-    yearly_save = monthly_save * 12
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Monthly savings", f"₪{monthly_save:.2f}")
-    c2.metric("Yearly savings", f"₪{yearly_save:.2f}")
-    c3.metric("Assumed current loss (mo)", f"₪{lost_month:.2f}")
-
-def _tab_data(hist: pd.DataFrame):
-    st.subheader("Data")
-    with st.expander("Usage history (raw)"):
-        st.dataframe(hist.sort_values("ts", ascending=False), use_container_width=True, height=380)
-    st.download_button(
-        "📥 Download history CSV",
-        data=hist.to_csv(index=False).encode("utf-8"),
-        file_name="usage_history.csv",
-        mime="text/csv"
+def load_usage(user_id: int, since_iso: str) -> pd.DataFrame:
+    return _read_sql(
+        """
+        SELECT u.item_id, u.event_type, COALESCE(u.step_count,0) AS step_count, u.ts,
+               i.name, i.base_unit, COALESCE(i.price_per_base,0) AS price_per_base
+          FROM usage_log u
+          JOIN inventory i ON i.id = u.item_id
+         WHERE u.user_id=? AND substr(u.ts,1,10)>=?
+         ORDER BY u.ts DESC
+        """,
+        (user_id, since_iso),
     )
 
-# ------------------------------------------------------------------------------
-# Entry
-# ------------------------------------------------------------------------------
-def dashboard():
-    st.title("📊 Executive Dashboard")
-    st.caption(f"As of {date.today():%A, %d %B %Y}")
+def load_purchases(user_id: int, month_prefix: Optional[str] = None) -> pd.DataFrame:
+    if month_prefix:
+        return _read_sql(
+            """
+            SELECT p.item_id, p.store_id, p.qty_base, p.unit_price_base, p.total_paid, p.ts,
+                   i.name, i.type, i.base_unit, s.name AS store_name
+              FROM purchases_log p
+         LEFT JOIN inventory i ON i.id = p.item_id
+         LEFT JOIN stores s    ON s.id = p.store_id
+             WHERE p.user_id=? AND substr(p.ts,1,7)=?
+             ORDER BY p.ts DESC
+            """,
+            (user_id, month_prefix),
+        )
+    return _read_sql(
+        """
+        SELECT p.item_id, p.store_id, p.qty_base, p.unit_price_base, p.total_paid, p.ts,
+               i.name, i.type, i.base_unit, s.name AS store_name
+          FROM purchases_log p
+     LEFT JOIN inventory i ON i.id = p.item_id
+     LEFT JOIN stores s    ON s.id = p.store_id
+         WHERE p.user_id=?
+         ORDER BY p.ts DESC
+        """,
+        (user_id,),
+    )
 
-    if "user_id" not in st.session_state:
-        st.warning("Please login first.")
-        st.stop()
-    user_id = int(st.session_state["user_id"])
+def avg_daily_usage(df_usage: pd.DataFrame, since_iso: str) -> pd.DataFrame:
+    if df_usage.empty:
+        return pd.DataFrame(columns=["item_id", "avg_daily_base"])
+    start = datetime.fromisoformat(since_iso).date()
+    days = max(1, (TODAY - start).days)
+    used = df_usage[df_usage["event_type"] == "used"].copy()
+    if used.empty:
+        return pd.DataFrame(columns=["item_id", "avg_daily_base"])
 
-    hist = _load_history(user_id)
-    total_items, used, expired, lost = _kpis(user_id)
+    def steps_to_amt(row):
+        return float(row.step_count or 0.0) * _step_for(str(row.base_unit or "pcs"))
 
-    # Tabs
-    tabs = st.tabs(["Overview", "Trends", "Categories", "Pareto", "Forecast", "Simulator", "Data"])
+    used["amt_base"] = used.apply(steps_to_amt, axis=1)
+    g = used.groupby("item_id", as_index=False)["amt_base"].sum()
+    g["avg_daily_base"] = g["amt_base"] / days
+    return g[["item_id", "avg_daily_base"]]
+
+def coverage_days(inv: pd.DataFrame, avg_daily: pd.DataFrame) -> pd.DataFrame:
+    if inv.empty:
+        return inv.assign(coverage_days=math.inf)
+    out = inv.merge(avg_daily, how="left", left_on="id", right_on="item_id")
+    out["avg_daily_base"] = out["avg_daily_base"].fillna(0.0)
+    out["coverage_days"] = out.apply(
+        lambda r: (r["base_amount"] / r["avg_daily_base"]) if r["avg_daily_base"] > 0 else math.inf, axis=1
+    )
+    return out.drop(columns=["item_id"])
+
+# -----------------------------------------------------------------------------
+# AI helpers
+# -----------------------------------------------------------------------------
+def _ai_summary_payload(user_id: int, window_days: int = 60, month_pick: Optional[str] = None) -> dict:
+    since_iso = (TODAY - timedelta(days=window_days)).strftime("%Y-%m-%d")
+    inv = load_inventory_snapshot(user_id)
+    usage = load_usage(user_id, since_iso)
+    purch = load_purchases(user_id, month_pick or TODAY.strftime("%Y-%m"))
+
+    inv_tiny = inv[["name", "type", "base_unit", "base_amount", "price_per_base", "value", "expiration"]].copy()
+    inv_csv = inv_tiny.to_csv(index=False)
+
+    expd = usage[usage["event_type"] == "expired"].copy()
+    if not expd.empty:
+        def expired_value(row):
+            amt = float(row.step_count or 0.0) * _step_for(str(row.base_unit or "pcs"))
+            return amt * float(row.price_per_base or 0.0)
+        expd["waste_value"] = expd.apply(expired_value, axis=1)
+        waste_tot = float(expd["waste_value"].sum())
+        waste_top = (
+            expd.groupby("name", as_index=False)["waste_value"]
+            .sum()
+            .sort_values("waste_value", ascending=False)
+            .head(10)
+            .values.tolist()
+        )
+    else:
+        waste_tot = 0.0
+        waste_top = []
+
+    if purch.empty:
+        spend_month = 0.0
+        by_store = []
+    else:
+        spend_month = float(purch["total_paid"].sum())
+        g = purch.groupby("store_name", as_index=False)["total_paid"].sum().sort_values("total_paid", ascending=False)
+        by_store = g.values.tolist()
+
+    meta = {
+        "window_days": window_days,
+        "since": since_iso,
+        "month": month_pick or TODAY.strftime("%Y-%m"),
+        "inventory_value": float(inv["value"].sum()),
+        "items_on_hand": int((inv["base_amount"] > 0).sum()),
+        "expiring_7_count": int(((inv["days_until"] >= 0) & (inv["days_until"] <= 7) & (inv["base_amount"] > 0)).sum()),
+        "waste_total": waste_tot,
+        "spend_month": spend_month,
+    }
+    return {"meta": meta, "inventory_csv": inv_csv, "waste_top": waste_top, "spend_by_store": by_store}
+
+def _call_openai(prompt: str) -> Optional[str]:
+    if OpenAI is None:
+        return "OpenAI SDK missing. Install `openai>=1.0` and set OPENAI_API_KEY in Streamlit secrets."
+    try:
+        api_key = st.secrets["OPENAI_API_KEY"]
+    except Exception:
+        return "OPENAI_API_KEY not found in Streamlit secrets."
+    try:
+        client = OpenAI(api_key=api_key)
+        rsp = client.chat.completions.create(
+            model=_model_name(),
+            temperature=0.2,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an operations analyst. Explain clearly for non-experts. "
+                        "Use short sections, bullets, and concrete numbers. Give 3–6 specific actions."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return rsp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"OpenAI call failed: {e}"
+
+# -----------------------------------------------------------------------------
+# Tab screens
+# -----------------------------------------------------------------------------
+def tab_overview(user_id: int):
+    c1, c2 = st.columns([1.2, 1.6])
+    window_days = c1.slider("Analysis window (days)", 7, 180, 60, 1, key="ov_win")
+    THIS_MONTH = TODAY.strftime("%Y-%m")
+    PREV_MONTH = (TODAY - timedelta(days=31)).strftime("%Y-%m")
+    month_pick = c2.selectbox("Spend month", [THIS_MONTH, PREV_MONTH], index=0, key="ov_month")
+
+    since_iso = (TODAY - timedelta(days=window_days)).strftime("%Y-%m-%d")
+    inv = load_inventory_snapshot(user_id)
+    usage = load_usage(user_id, since_iso)
+    purch_m = load_purchases(user_id, month_pick)
+
+    total_value = inv["value"].sum()
+    items_on_hand = int((inv["base_amount"] > 0).sum())
+    expiring_7 = int(((inv["days_until"] >= 0) & (inv["days_until"] <= 7) & (inv["base_amount"] > 0)).sum())
+    expired_events = int((usage["event_type"] == "expired").sum())
+    used_events = int((usage["event_type"] == "used").sum())
+    spent_month = float(purch_m["total_paid"].sum() if not purch_m.empty else 0.0)
+
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Inventory value", _money(total_value))
+    k2.metric("Items with stock", f"{items_on_hand}")
+    k3.metric("Expiring ≤ 7 days", f"{expiring_7}")
+    k4.metric("Expired events", f"{expired_events}")
+    k5.metric("Used events", f"{used_events}")
+    k6.metric(f"Spend {month_pick}", _money(spent_month))
+
+    st.divider()
+    left, right = st.columns([5, 2])
+
+    with left:
+        st.subheader("⏱️ Expiry timeline (next 60 days)")
+        nxt = inv[(inv["expiration"] != "") & inv["expiration"].notna()].copy()
+        if nxt.empty:
+            st.caption("No expiries recorded.")
+        else:
+            nxt["exp_date"] = pd.to_datetime(nxt["expiration"], errors="coerce").dt.date
+            end = TODAY + timedelta(days=60)
+            nxt = nxt[(nxt["exp_date"] >= TODAY) & (nxt["exp_date"] <= end)]
+            if nxt.empty:
+                st.caption("Nothing expiring soon.")
+            else:
+                grp = nxt.groupby("exp_date", as_index=False).agg(items=("id", "count"), value=("value", "sum"))
+                st.area_chart(grp.set_index("exp_date")[["items", "value"]])
+
+        st.subheader("🧪 Waste (last window)")
+        expd = usage[usage["event_type"] == "expired"].copy()
+        if expd.empty:
+            st.caption("No expired events.")
+        else:
+            def expired_value(row):
+                amt = float(row.step_count or 0.0) * _step_for(str(row.base_unit or "pcs"))
+                return amt * float(row.price_per_base or 0.0)
+
+            expd["waste_value"] = expd.apply(expired_value, axis=1)
+            top = (
+                expd.groupby(["item_id", "name"], as_index=False)["waste_value"]
+                .sum()
+                .sort_values("waste_value", ascending=False)
+                .head(10)
+            )
+            st.bar_chart(top.set_index("name")["waste_value"])
+
+    with right:
+        st.subheader("Guide")
+        st.markdown(
+            """
+**Read this tab like a heartbeat monitor.**  
+- Tiles query the DB every render.  
+- “Expiring ≤ 7 days” counts only items with positive qty.  
+- Waste ₪ = expired steps × step_size × ₪/base.
+"""
+        )
+
+def tab_risk_waste(user_id: int):
+    window_days = st.slider("Window (days)", 7, 120, 60, 1, key="rw_win")
+    since_iso = (TODAY - timedelta(days=window_days)).strftime("%Y-%m-%d")
+    inv = load_inventory_snapshot(user_id)
+    usage = load_usage(user_id, since_iso)
+
+    left, right = st.columns([5, 2])
+
+    with left:
+        st.subheader("Critical & Upcoming Expiry")
+        nxt = inv[(inv["expiration"] != "") & inv["expiration"].notna()].copy()
+        nxt["exp_date"] = pd.to_datetime(nxt["expiration"], errors="coerce").dt.date
+        crit = nxt[nxt["exp_date"] <= TODAY]
+        soon = nxt[(nxt["exp_date"] > TODAY) & (nxt["exp_date"] <= TODAY + timedelta(days=7))]
+        c1, c2 = st.columns(2)
+        c1.metric("Already expired", int(len(crit)))
+        c2.metric("Expire ≤ 7 days", int(len(soon)))
+
+        if not soon.empty:
+            grp = soon.groupby("exp_date", as_index=False).agg(items=("id", "count"), value=("value", "sum"))
+            st.area_chart(grp.set_index("exp_date")[["items", "value"]])
+
+        st.subheader("Top Waste Culprits")
+        expd = usage[usage["event_type"] == "expired"].copy()
+        if expd.empty:
+            st.caption("No expired events in window.")
+        else:
+            def expired_value(row):
+                amt = float(row.step_count or 0.0) * _step_for(str(row.base_unit or "pcs"))
+                return amt * float(row.price_per_base or 0.0)
+
+            expd["waste_value"] = expd.apply(expired_value, axis=1)
+            top = (
+                expd.groupby(["item_id", "name"], as_index=False)["waste_value"]
+                .sum()
+                .sort_values("waste_value", ascending=False)
+            )
+            top["₪ waste"] = top["waste_value"].apply(_money)
+            st.bar_chart(top.head(15).set_index("name")["waste_value"])
+            with st.expander("Details"):
+                st.dataframe(top[["name", "₪ waste"]], use_container_width=True)
+
+    with right:
+        st.subheader("Guide")
+        st.markdown(
+            """
+**Ops triage.**  
+- Hit “soon” list first; use/freeze now.  
+- Waste table shows where rules or par levels matter most.  
+- Then use SmartCoach to automate routine saves.
+"""
+        )
+
+def tab_spend_suppliers(user_id: int):
+    THIS_MONTH = TODAY.strftime("%Y-%m")
+    PREV_MONTH = (TODAY - timedelta(days=31)).strftime("%Y-%m")
+    month_pick = st.selectbox("Month", [THIS_MONTH, PREV_MONTH], index=0, key="ss_month")
+    purch = load_purchases(user_id, month_pick)
+
+    left, right = st.columns([5, 2])
+
+    with left:
+        st.subheader(f"Spend by store ({month_pick})")
+        if purch.empty:
+            st.caption("No purchases for selected month.")
+        else:
+            g = purch.copy()
+            g["store_name"] = g["store_name"].fillna("Unknown")
+            g = g.groupby("store_name", as_index=False)["total_paid"].sum().sort_values("total_paid", ascending=False)
+            st.bar_chart(g.set_index("store_name")["total_paid"])
+            with st.expander("Table"):
+                g["₪"] = g["total_paid"].apply(_money)
+                st.dataframe(g[["store_name", "₪"]], use_container_width=True)
+
+        st.subheader("ABC (Pareto) by spend (last 90 days)")
+        p_all = load_purchases(user_id)
+        if p_all.empty:
+            st.caption("No purchase history.")
+        else:
+            p = p_all[p_all["ts"] >= (TODAY - timedelta(days=90)).strftime("%Y-%m-%d")].copy()
+            g = p.groupby(["item_id", "name"], as_index=False)["total_paid"].sum().sort_values("total_paid", ascending=False)
+            if g.empty:
+                st.caption("Nothing in last 90 days.")
+            else:
+                g["cum_share"] = g["total_paid"].cumsum() / g["total_paid"].sum()
+                g["Class"] = g["cum_share"].apply(lambda x: "A" if x <= 0.80 else "B" if x <= 0.95 else "C")
+                counts = g["Class"].value_counts().reindex(["A", "B", "C"]).fillna(0).astype(int)
+                st.bar_chart(counts)
+                with st.expander("Top A items"):
+                    topA = g[g["Class"] == "A"].copy()
+                    topA["₪"] = topA["total_paid"].apply(_money)
+                    st.dataframe(topA[["name", "₪", "cum_share"]], use_container_width=True)
+
+    with right:
+        st.subheader("Guide")
+        st.markdown(
+            """
+**Procurement view.**  
+- Stores bar shows who gets your money.  
+- ABC: negotiate A, standardize B, ignore C.
+"""
+        )
+
+def tab_coverage_forecast(user_id: int):
+    # Improved at-risk logic: likely waste and sensible ordering
+    window_days = st.slider("Usage window (days)", 7, 180, 60, 1, key="cf_win")
+    since_iso = (TODAY - timedelta(days=window_days)).strftime("%Y-%m-%d")
+
+    inv = load_inventory_snapshot(user_id)
+    usage = load_usage(user_id, since_iso)
+    avg = avg_daily_usage(usage, since_iso)
+    cov = coverage_days(inv, avg)  # includes avg_daily_base already; do NOT re-merge
+
+    if cov.empty:
+        st.caption("No inventory.")
+        return
+
+    # Safety: ensure column exists
+    if "avg_daily_base" not in cov.columns:
+        cov["avg_daily_base"] = 0.0
+
+    cov["likely_waste"] = cov.apply(
+        lambda r: _likely_waste_value(
+            float(r.get("base_amount", 0.0)),
+            int(r["days_until"]) if pd.notnull(r["days_until"]) else None,
+            float(r.get("avg_daily_base", 0.0)),
+            float(r.get("price_per_base", 0.0)),
+        ),
+        axis=1,
+    )
+
+    # Display rows that actually represent risk
+    show = cov[
+        ((cov["days_until"].notna()) & (cov["days_until"] <= 14))  # expiring soon
+        | (cov["likely_waste"] > 0.0)                              # won't finish before date
+        | (cov["coverage_days"] < 7)                               # low stock even without date
+    ].copy()
+
+    if show.empty:
+        st.caption("No material risk detected in the chosen window.")
+    else:
+        records = []
+        for _, r in show.iterrows():
+            qty, unit = _friendly_qty(float(r.get("base_amount", 0.0)), str(r.get("base_unit", "pcs")))
+            records.append({
+                "Item": r.get("name", ""),
+                "Type": r.get("type", ""),
+                "On hand": f"{qty:,.0f} {unit}" if unit in ("pcs", "kg", "l") else f"{qty:,.1f} {unit}",
+                "₪/base": f"{float(r.get('price_per_base', 0.0)):.4f}",
+                "Value ₪": _pretty_money(float(r.get("value", 0.0))),
+                "Days left": (int(r["days_until"]) if pd.notnull(r["days_until"]) else None),
+                "Coverage (d)": ("∞" if math.isinf(float(r.get("coverage_days", math.inf))) else f"{float(r.get('coverage_days', 0.0)):.1f}"),
+                "Likely waste ₪": _pretty_money(float(r.get("likely_waste", 0.0))),
+            })
+
+        df = pd.DataFrame(records)
+        # Sort earliest expiry first, then most likely waste; None days at bottom
+        df = df.sort_values(by=["Days left", "Likely waste ₪"], ascending=[True, False], na_position="last")
+
+        st.subheader("At-risk: expiry vs usage capacity")
+        st.dataframe(df, use_container_width=True, height=460)
+
+    with st.expander("How to read this"):
+        st.markdown(
+            """
+- **Likely waste ₪** estimates what you won’t finish before expiry at your recent usage rate.  
+- **Coverage (d)** is a hint; when **Days left** is small, expiry wins.  
+- Work top to bottom, then add par levels or SmartCoach rules for repeat offenders.
+"""
+        )
+
+def tab_trends(user_id: int):
+    left, right = st.columns([5, 2])
+    with left:
+        pu_all = load_purchases(user_id)
+        if pu_all.empty:
+            st.caption("No purchases recorded.")
+            return
+        items = pu_all[["item_id", "name"]].dropna().drop_duplicates().sort_values("name")
+        if items.empty:
+            st.caption("No named items found.")
+            return
+        pick = st.selectbox("Item", list(items.itertuples(index=False)), format_func=lambda r: r.name, key="trend_pick")
+        trend = pu_all[pu_all["item_id"] == pick.item_id].copy()
+        if len(trend) < 2:
+            st.caption("Need at least two purchases to show a trend.")
+            return
+        trend["ts_date"] = pd.to_datetime(trend["ts"], errors="coerce")
+        trend = trend.sort_values("ts_date")
+        st.line_chart(trend.set_index("ts_date")[["unit_price_base"]])
+        with st.expander("Table"):
+            t = trend[["ts", "store_name", "qty_base", "unit_price_base", "total_paid"]].copy()
+            t.rename(
+                columns={
+                    "ts": "Date",
+                    "store_name": "Store",
+                    "qty_base": "Qty (base)",
+                    "unit_price_base": "₪/base",
+                    "total_paid": "Paid ₪",
+                },
+                inplace=True,
+            )
+            t["Paid ₪"] = t["Paid ₪"].apply(_money)
+            st.dataframe(t, use_container_width=True)
+    with right:
+        st.subheader("Guide")
+        st.markdown(
+            """
+**Pricing telemetry.**  
+- Watch slope; shift stores if it rises.  
+- Lock contracts on chronic risers.
+"""
+        )
+
+def tab_ai_insights(user_id: int):
+    left, right = st.columns([5, 2])
+
+    with left:
+        window_days = st.slider("Analysis window (days)", 30, 180, 60, 10, key="ai_win")
+        THIS_MONTH = TODAY.strftime("%Y-%m")
+        PREV_MONTH = (TODAY - timedelta(days=31)).strftime("%Y-%m")
+        month_pick = st.selectbox("Spend month", [THIS_MONTH, PREV_MONTH], index=0, key="ai_month")
+
+        payload = _ai_summary_payload(user_id, window_days, month_pick)
+
+        st.subheader("Executive summary")
+        with st.spinner("Asking AI to read your data..."):
+            prompt = (
+                "Read this data and produce a short executive summary in plain language, then give concrete actions.\n\n"
+                f"META: {payload['meta']}\n\n"
+                f"WASTE_TOP (name,₪): {payload['waste_top']}\n\n"
+                f"SPEND_BY_STORE (store,₪): {payload['spend_by_store']}\n\n"
+                "INVENTORY_CSV:\n"
+                f"{payload['inventory_csv'][:20000]}"
+            )
+            ans = _call_openai(prompt)
+        st.markdown(ans or "No response.")
+
+        st.divider()
+        st.subheader("Ask a question about the data")
+        q = st.text_input("Question (e.g., What should I buy less of next month?)", key="ai_q")
+        if q:
+            with st.spinner("Thinking..."):
+                prompt_q = (
+                    "Answer the question using only the following data. If uncertain, say what else is needed.\n\n"
+                    f"QUESTION: {q}\n\nMETA: {payload['meta']}\n\n"
+                    f"WASTE_TOP: {payload['waste_top']}\n\nSPEND_BY_STORE: {payload['spend_by_store']}\n\n"
+                    f"INVENTORY_CSV:\n{payload['inventory_csv'][:20000]}"
+                )
+                ans_q = _call_openai(prompt_q)
+            st.markdown(ans_q or "No response.")
+
+    with right:
+        st.subheader("Guide")
+        st.markdown(
+            """
+**AI analyst.**  
+- Feeds a compact snapshot into the model each time.  
+- Keep purchases/usage updated or the AI is reading fiction.
+"""
+        )
+
+def tab_raw(user_id: int):
+    window_days = st.slider("Usage window (days)", 7, 180, 60, 1, key="raw_win")
+    since_iso = (TODAY - timedelta(days=window_days)).strftime("%Y-%m-%d")
+    THIS_MONTH = TODAY.strftime("%Y-%m")
+
+    inv = load_inventory_snapshot(user_id)
+    usage = load_usage(user_id, since_iso)
+    purch_m = load_purchases(user_id, THIS_MONTH)
+
+    left, right = st.columns([5, 2])
+
+    with left:
+        st.subheader("Inventory snapshot")
+        if inv.empty:
+            st.caption("No inventory.")
+        else:
+            snap = inv[
+                ["name", "type", "base_unit", "base_amount", "price_per_base", "value", "expiration", "days_until"]
+            ].copy()
+            snap.rename(
+                columns={
+                    "name": "Item",
+                    "type": "Type",
+                    "base_unit": "Unit",
+                    "base_amount": "On hand",
+                    "price_per_base": "₪/base",
+                    "value": "Value ₪",
+                    "expiration": "Expiry",
+                    "days_until": "Days left",
+                },
+                inplace=True,
+            )
+            snap["Value ₪"] = snap["Value ₪"].apply(_money)
+            st.dataframe(
+                snap.sort_values(["Days left", "Value ₪"], na_position="last"),
+                use_container_width=True,
+                height=350,
+            )
+
+        st.subheader("Usage log")
+        if usage.empty:
+            st.caption(f"No usage entries since {since_iso}.")
+        else:
+            u = usage.rename(
+                columns={
+                    "ts": "Date",
+                    "name": "Item",
+                    "base_unit": "Unit",
+                    "event_type": "Event",
+                    "step_count": "Steps",
+                    "price_per_base": "₪/base",
+                }
+            )
+            st.dataframe(u[["Date", "Event", "Item", "Unit", "Steps", "₪/base"]], use_container_width=True, height=300)
+
+        st.subheader("Purchases")
+        if purch_m.empty:
+            st.caption(f"No purchases for {THIS_MONTH}.")
+        else:
+            p = purch_m.rename(
+                columns={
+                    "ts": "Date",
+                    "store_name": "Store",
+                    "name": "Item",
+                    "qty_base": "Qty (base)",
+                    "unit_price_base": "₪/base",
+                    "total_paid": "Paid ₪",
+                    "type": "Type",
+                    "base_unit": "Unit",
+                }
+            )
+            p["Paid ₪"] = p["Paid ₪"].apply(_money)
+            st.dataframe(
+                p[["Date", "Store", "Item", "Type", "Unit", "Qty (base)", "₪/base", "Paid ₪"]],
+                use_container_width=True,
+                height=300,
+            )
+
+# -----------------------------------------------------------------------------
+# Main (tabs like Recipes)
+# -----------------------------------------------------------------------------
+def main():
+    st.title("📊 Dashboard")
+    user_id = _resolve_user_id()
+
+    tabs = st.tabs(
+        ["Overview", "Risk & Waste", "Spend & Suppliers", "Coverage & Forecast", "Trends", "AI Insights", "Raw Data"]
+    )
+
     with tabs[0]:
-        _tab_overview(user_id, hist)
+        tab_overview(user_id)
     with tabs[1]:
-        if hist.empty: st.info("No history yet."); 
-        else: _tab_trends(hist)
+        tab_risk_waste(user_id)
     with tabs[2]:
-        if hist.empty: st.info("No history yet."); 
-        else: _tab_categories(hist)
+        tab_spend_suppliers(user_id)
     with tabs[3]:
-        if hist.empty: st.info("No history yet."); 
-        else: _tab_pareto(hist)
+        tab_coverage_forecast(user_id)
     with tabs[4]:
-        if hist.empty: st.info("Not enough data to forecast."); 
-        else: _tab_forecast(hist)
+        tab_trends(user_id)
     with tabs[5]:
-        _tab_simulator(lost)
+        tab_ai_insights(user_id)
     with tabs[6]:
-        _tab_data(hist)
+        tab_raw(user_id)
+
+# Router entry points your loader expects
+def dashboard():
+    main()
 
 def app():
-    dashboard()
+    main()
+
+app = dashboard
 
 if __name__ == "__main__":
-    dashboard()
+    main()

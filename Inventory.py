@@ -152,6 +152,11 @@ def _browse_inventory(user_id: int):
         thaw_days = st.number_input("Days safe after thaw optional", min_value=0, step=1, value=0)
         auto_parse = st.checkbox("Auto-parse quantity from name (e.g., 'Eggs 12 pack', 'Tuna 500g')", value=True)
 
+        # Hint default cap if user leaves it 0
+        default_cap = core.default_thaw_days(typ)
+        if (not thaw_days) and default_cap:
+            st.caption(f"Default post-thaw cap for {typ}: {default_cap} day(s). Leave 0 to use it.")
+
         base_amount, base_unit = core.to_base(amount_ui, unit_ui)
         ppb = core.compute_price_per_base(total_cost, base_amount)
 
@@ -207,15 +212,18 @@ def _browse_inventory(user_id: int):
         if kind_filter != "all" and kind != kind_filter:
             continue
 
+        thaw_eff = (int(thaw_days) if thaw_days else core.default_thaw_days(typ))
+
+        # pass thaw_eff so post-thaw life is respected
         eff_exp, status_text, color, no_expiry = core.effective_expiration_display(
-            exp, storage_state, frozen_at, thawed_at, int(frozen_days_accum or 0), stable, base_amount
+            exp, storage_state, frozen_at, thawed_at, int(frozen_days_accum or 0), stable, base_amount, thaw_eff
         )
         if state_filter == "frozen" and storage_state != "frozen":
             continue
         if state_filter == "expired soon":
             if no_expiry or (eff_exp - core.today()).days > 2:
                 continue
-        filtered.append((r, eff_exp, status_text, color, no_expiry))
+        filtered.append((r, eff_exp, status_text, color, no_expiry, thaw_eff))
 
     reverse = direction == "desc"
     if sort_by == "name":
@@ -235,7 +243,7 @@ def _browse_inventory(user_id: int):
 
     # Render cards
     colA, colB = st.columns(2)
-    for i, (r, eff_exp, status_text, color, no_expiry) in enumerate(filtered):
+    for i, (r, eff_exp, status_text, color, no_expiry, thaw_eff) in enumerate(filtered):
         (
             item_id, name, exp, typ, amount_ui, unit_ui, used_count, last_m, stable, ppu_legacy,
             expired_steps, money_lost, kind, base_unit, base_amount, total_cost, price_per_base,
@@ -253,12 +261,29 @@ def _browse_inventory(user_id: int):
 
         host = colA if i % 2 == 0 else colB
         with host:
-            exp_label = "—" if no_expiry else eff_exp.strftime("%Y-%m-%d")
+            # Build effective expiry and a short explanation only if needed
+            if no_expiry:
+                exp_html = "—"
+                explain_html = ""
+            else:
+                eff_b, base_b, paused_b, thaw_cap_b, remain_thaw = core.effective_expiration_explain(
+                    exp, storage_state, frozen_at, thawed_at, int(frozen_days_accum or 0), thaw_eff
+                )
+                exp_html = eff_b.strftime("%Y-%m-%d")
+                parts = []
+                if paused_b > 0:
+                    parts.append(f"base {base_b.strftime('%Y-%m-%d')} + {paused_b}d frozen pause")
+                if thawed_at and remain_thaw is not None:
+                    parts.append(f"resumes {remain_thaw}d after thaw ({thawed_at})")
+                if thaw_cap_b and thaw_cap_b <= eff_b:
+                    parts.append(f"capped by post-thaw to {thaw_cap_b.strftime('%Y-%m-%d')}")
+                explain_html = f"<br><span style='color:#888;'>{' · '.join(parts)}</span>" if parts else ""
+
             st.markdown(f"""
                 <div style='background:#1f1f1f;border-left:6px solid {color};
                             padding:14px 16px;border-radius:12px;margin-bottom:12px'>
                   <h4 style='margin:0;color:#fafafa'>{name} <span style='font-size:12px;color:#8ab4f8'>({kind})</span> <span style='font-size:12px;color:#888;'>[{typ}]</span></h4>
-                  <p style='margin:4px 0;color:#ccc;'>📅 <b>Expires:</b> {exp_label}  |  🔔 <b>{status_text}</b></p>
+                  <p style='margin:4px 0;color:#ccc;'>📅 <b>Expires:</b> {exp_html}{explain_html}  |  🔔 <b>{status_text}</b></p>
                   <p style='margin:4px 0;color:#ccc;'>🔢 <b>On hand:</b> {base_amount:.2f} {base_unit}  |  💲 <b>Hint:</b> ₪{hint_val} {hint_lbl}</p>
                   <p style='margin:4px 0;color:#ccc;'>✅ Used entries: {used_count}  |  🗑️ Expired entries: {expired_steps}  |  💸 Lost: ₪{round(money_lost or 0.0, 2)}</p>
                   {"<p style='margin:4px 0;color:#0ff;'>Stable item</p>" if stable else ""}
@@ -324,54 +349,34 @@ def _browse_inventory(user_id: int):
                             st.success("Component saved"); st.rerun()
 
                         comps = core.recipe_components(user_id, item_id)
-                        total_cost = 0.0
+                        total_cost_calc = 0.0
                         for cid, nm, bu, q, ppb in comps:
-                            line_cost = float(q) * float(ppb or 0.0); total_cost += line_cost
+                            line_cost = float(q) * float(ppb or 0.0); total_cost_calc += line_cost
                             d1, d2, d3, d4 = st.columns([2, 1, 1, 1])
                             d1.write(nm); d2.write(f"{q:.2f} {bu}"); d3.write(f"₪{(ppb or 0.0):.2f}/base")
                             if d4.button("Remove", key=f"ri_del_{cid}"):
                                 core.delete_recipe_component(cid); st.warning("Removed"); st.rerun()
                         if comps:
-                            st.metric("Estimated total ingredient cost", f"₪{total_cost:.2f}")
+                            st.metric("Estimated total ingredient cost", f"₪{total_cost_calc:.2f}")
                             colu1, colu2 = st.columns([1, 2])
                             new_yield = colu1.number_input("Expected yield base", min_value=0.0, step=1.0, value=0.0, key=f"ri_yield_{item_id}")
                             if colu2.button("Update item cost from recipe", key=f"ri_push_{item_id}"):
-                                core.push_recipe_cost_to_item(item_id, total_cost, float(new_yield or 0.0))
+                                core.push_recipe_cost_to_item(item_id, total_cost_calc, float(new_yield or 0.0))
                                 st.success("Item updated from recipe"); st.rerun()
-
-                with st.expander("Batches"):
-                    e1, e2, e3 = st.columns(3)
-                    cooked = e1.date_input("Cooked at", value=core.today(), max_value=core.FAR_FUTURE, key=f"b_dt_{item_id}")
-                    portion = e2.number_input("Portion size base", min_value=0.0, step=1.0, value=0.0, key=f"b_ps_{item_id}")
-                    total_y = e3.number_input("Total yield base", min_value=0.0, step=1.0, value=0.0, key=f"b_ty_{item_id}")
-                    k1, k2 = st.columns(2)
-                    batch_exp = k1.date_input("Batch expiration", value=core.today(), max_value=core.FAR_FUTURE, key=f"b_ex_{item_id}")
-                    batch_cost = k2.number_input("Batch cost override ₪", min_value=0.0, step=0.1, value=0.0, key=f"b_cost_{item_id}")
-                    if st.button("Create batch", key=f"b_create_{item_id}"):
-                        core.create_batch(item_id, cooked, total_y, portion, batch_exp, batch_cost)
-                        st.success("Batch created"); st.rerun()
-
-                    rows_b = core.list_batches(item_id)
-                    if not rows_b:
-                        st.caption("No batches yet.")
-                    else:
-                        for bid, cooked_at, total_y, portion_size, remaining, exp_b, state in rows_b:
-                            col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 1.5, 2])
-                            col1.write(f"Cooked {cooked_at}")
-                            col2.write(f"Remaining {remaining:.1f} base")
-                            col3.write(f"Portion {portion_size:.1f} base")
-                            col4.write(state)
-                            if col5.button("Use one portion", key=f"b_use_{bid}"):
-                                core.use_batch_portion(bid); st.success("Portion used"); st.rerun()
 
             with st.expander("Edit"):
                 new_name = st.text_input("Name", value=name, key=f"nm_{item_id}")
-                new_exp = st.date_input("Expiration (ignored while Stable & 0 on hand)",
+                new_exp = st.date_input("Base expiration (raw before freeze/thaw math)",
                                         value=min(core.parse_iso(exp), core.FAR_FUTURE),
                                         max_value=core.FAR_FUTURE, key=f"ex_{item_id}")
-                new_typ = st.selectbox("Type", core.CATEGORIES, index=(core.CATEGORIES.index(typ) if typ in core.CATEGORIES else core.CATEGORIES.index("Other")), key=f"tp_{item_id}")
 
-                ui_unit_choice = st.selectbox("Display unit", core.UNITS, index=core.UNITS.index(unit_ui) if unit_ui in core.UNITS else 0, key=f"uiunit_{item_id}")
+                new_typ = st.selectbox("Type", core.CATEGORIES,
+                                       index=(core.CATEGORIES.index(typ) if typ in core.CATEGORIES else core.CATEGORIES.index("Other")),
+                                       key=f"tp_{item_id}")
+
+                ui_unit_choice = st.selectbox("Display unit", core.UNITS,
+                                              index=core.UNITS.index(unit_ui) if unit_ui in core.UNITS else 0,
+                                              key=f"uiunit_{item_id}")
                 display_amount = core.from_base(base_amount, ui_unit_choice)
                 new_amount_ui = st.number_input("Amount", min_value=0.0, value=float(display_amount), step=0.1, key=f"am_{item_id}")
                 new_total = st.number_input("Total cost ₪", min_value=0.0, value=float(total_cost or 0.0), step=0.1, key=f"tt_{item_id}")
@@ -379,6 +384,22 @@ def _browse_inventory(user_id: int):
                 new_thaw_days = st.number_input("Days safe after thaw optional", min_value=0, step=1, value=int(thaw_days or 0), key=f"td_{item_id}")
                 new_recipe = st.text_area("Notes", value=recipe_note or "", key=f"rc_{item_id}")
                 auto_parse_edit = st.checkbox("Auto-parse quantity from name", value=True, key=f"ap_{item_id}")
+
+                # Echo effective date with explanation
+                if not no_expiry:
+                    eff_b, base_b, paused_b, thaw_cap_b, remain_thaw = core.effective_expiration_explain(
+                        exp, storage_state, frozen_at, thawed_at,
+                        int(frozen_days_accum or 0),
+                        int(new_thaw_days) if new_thaw_days else core.default_thaw_days(new_typ or typ)
+                    )
+                    bits = []
+                    if paused_b > 0:
+                        bits.append(f"+{paused_b}d frozen pause")
+                    if thawed_at and remain_thaw is not None:
+                        bits.append(f"resumes {remain_thaw}d after thaw ({thawed_at})")
+                    if thaw_cap_b:
+                        bits.append(f"post-thaw cap {thaw_cap_b.strftime('%Y-%m-%d')}")
+                    st.caption(f"Effective expiry: {eff_b.strftime('%Y-%m-%d')}" + (f" ({'; '.join(bits)})" if bits else ""))
 
                 del_cols = st.columns([1, 1.6, 1])
                 confirm_del = del_cols[0].checkbox("Confirm delete", key=f"delc_{item_id}")
@@ -408,8 +429,8 @@ def _browse_inventory(user_id: int):
                     except Exception as e:
                         st.error(str(e))
 
-            if storage_state != "frozen" and thaw_days:
-                st.caption(f"After thaw consume within about {thaw_days} day(s)")
+            if storage_state != "frozen" and thaw_eff:
+                st.caption(f"After thaw consume within about {thaw_eff} day(s)")
 
 
 # --------------------------- ENTRY POINTS -------------------------------------
