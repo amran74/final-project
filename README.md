@@ -1,125 +1,145 @@
 ﻿# Smart Inventory & AI Analytics Platform
 
-A full-featured inventory management system built with **Python** and **Streamlit**, designed for real-world retail operations. The system integrates automated alerts, an AI assistant, dashboards, per-user accounts, and full WhatsApp notifications.
+A full-featured inventory management and analytics system built with **Python** and **Streamlit**, designed around real retail workflows and data-driven decision-making.  
+The app tracks stock, expiry, consumption behavior, and exposes this through dashboards and KPIs for managers.
+
+---
 
 ## Features
 
 ### 🔹 Inventory Management
-- Add, edit, delete items  
-- Track quantities, expiry dates, and item categories  
-- Stable items remain visible even at zero quantity  
-- Automatic deletion of expired items  
-- Monthly usage tracking for each product
+- Add, edit, delete items
+- Track:
+  - Quantity
+  - Expiry date
+  - Category / department
+  - Supplier (optional, if configured)
+- “Stable items” remain visible even at zero quantity (so critical items never disappear)
+- Automatic cleanup of expired items (configurable logic)
+- Monthly usage tracking per item
+
+### 🔹 Data & Analytics Focus
+- Monthly usage table and charts for each item and/or category
+- Identify:
+  - Fast-moving vs slow-moving products
+  - Items frequently running out
+  - Items commonly expiring on the shelf
+- Category-level summaries:
+  - Total quantity
+  - Average remaining shelf time
+  - Number of risky / low-stock items
+- Support for shrinkage / loss analysis via:
+  - Differences between expected and actual quantities
+  - Expired vs consumed breakdowns (where data is available)
+
+### 🔹 Dashboards & KPIs
+- Visual dashboards for:
+  - Usage over time (by item or category)
+  - Expiry trends
+  - Low-stock trends
+- KPIs designed for retail / pharmacy environments, for example:
+  - Number of items below minimum threshold
+  - Number of items expiring this week / month
+  - Items with repeated expiry issues
+- Filters by:
+  - Date range
+  - Category / department
+  - Status (OK / low / expiring / expired)
 
 ### 🔹 AI Assistant
-- Integrated OpenAI API for contextual assistance  
-- Explains inventory insights  
-- Helps write product notes, messages, or operational instructions  
-- Responds based on real inventory state
-
-### 🔹 Notifications (WhatsApp)
-- Twilio integration for WhatsApp alerts  
-- Sends notifications for:  
-  - Expiring items  
-  - Items reaching minimum quantity  
-  - Full inventory reports  
-- Per-user phone numbers (each user receives their own alerts)
+- Integrated **OpenAI API** for contextual help:
+  - Explain inventory trends in plain language
+  - Suggest actions (e.g., “which items should I reorder first?”)
+  - Help formulate messages, notes, or procedures based on the current inventory state
+- The assistant works on top of the actual data in the database, not imaginary numbers
 
 ### 🔹 Authentication System
-- Login & registration using SQLite  
-- Encrypted passwords  
-- Stores phone numbers and full name  
-- Personalized welcome messages  
-- "Forgot password" support
+- Login & registration using **SQLite**
+- Password hashing for safer storage
+- Stores:
+  - Full name
+  - Phone number (for identification inside the app, not for messaging)
+- Personalized greetings on login
+- “Forgot password” flow using stored data
 
 ### 🔹 Multi-Page Streamlit App
-- Homepage with calendar and quick menu  
-- Always-visible top navigation bar  
-- Inventory Page  
-- AI Assistant Page  
-- Dashboards Page
-
-### 🔹 Dashboards & Analytics
-- Monthly usage visualizations  
-- Category-level insights  
-- Stock risk analysis  
-- Expiry trends  
-- KPIs integrated to help retail managers understand shrinkage and stock behavior
+- Home / Dashboard page with:
+  - Calendar widget
+  - Quick navigation to main modules
+  - High-level KPIs
+- Inventory page for CRUD operations
+- Analytics / Dashboards page for charts and tables
+- AI Assistant page for conversational interaction with your data
+- Top navigation bar visible on all pages
 
 ### 🔹 UI/UX
-- Clean modern interface  
-- Improved homepage with reduced calendar dominance  
-- Menu shortcuts for fast navigation  
-- Designed without CSS/JS (Streamlit-only)
+- Clean Streamlit-based interface
+- Logical separation between:
+  - Operational actions (add/edit items)
+  - Analytical views (dashboards)
+  - Intelligent help (AI assistant)
+- Designed to be usable with mouse only, no technical knowledge required
 
 ---
 
 ## Tech Stack
 
-- **Python**
-- **Streamlit**
-- **SQLite**
-- **Pandas / NumPy**
-- **OpenAI API**
-- **Twilio API (WhatsApp)**
-- **Plotly / Matplotlib** for dashboards
+- Python
+- Streamlit
+- SQLite
+- Pandas / NumPy
+- OpenAI API
+- Plotly / Matplotlib (for charts and visualizations)
 
 ---
 
 ## Project Structure
 
-\\\
 project/
-│
-├── home.py              # Login/Register page
-├── homepage.py          # Main homepage with calendar
-├── inventory.py         # Inventory management
-├── assistant.py         # AI assistant
-├── dashboards.py        # Analytics & charts
-├── database.py          # SQLite models & functions
-├── utils.py             # Shared helper functions
-└── README.md
-\\\
+    home.py           - Login/Register screen
+    homepage.py       - Main homepage with calendar + KPIs
+    inventory.py      - Inventory management UI + logic
+    assistant.py      - AI assistant interface
+    dashboards.py     - Analytics & charts
+    database.py       - SQLite models & DB utilities
+    utils.py          - Shared helper functions
+    README.md
 
 ---
 
 ## Installation
 
-### 1. Clone the repository
-\\\
-git clone <repo-url>
-cd <project-folder>
-\\\
+1. Clone the repository
 
-### 2. Install dependencies
-\\\
-pip install -r requirements.txt
-\\\
+    git clone <repo-url>
+    cd <project-folder>
 
-### 3. Run the app
-\\\
-streamlit run home.py
-\\\
+2. Install dependencies
+
+    pip install -r requirements.txt
+
+3. Run the app
+
+    streamlit run home.py
 
 ---
 
-## Setup
+## Configuration
 
-### Configure environment variables  
-Create a \.env\ file with:
+Create a .env file in the project root with:
 
-\\\
-OPENAI_API_KEY=your_key
-TWILIO_SID=your_sid
-TWILIO_TOKEN=your_token
-TWILIO_WHATSAPP_NUMBER=whatsapp:+your_twilio_number
-\\\
+    OPENAI_API_KEY=your_openai_key_here
+
+Add any additional environment variables (e.g. DB path overrides) here if needed.
 
 ---
 
 ## Future Improvements
-- Multi-user roles (admin / manager / employee)  
-- Full audit logs  
-- Barcode scanning  
-- Exportable reports  
-- Cloud database integration  
+
+- Role-based access (admin / manager / staff)
+- More advanced analytics:
+  - Forecasting demand based on historical usage
+  - Automatic reorder suggestions
+- Exportable reports (Excel / CSV / PDF)
+- Optional integration with external ERP / POS systems
+- More detailed shrinkage tracking and reconciliation tooling
