@@ -32,6 +32,15 @@ The app tracks stock, expiry, consumption behavior, and exposes this through das
   - Differences between expected and actual quantities
   - Expired vs consumed breakdowns (where data is available)
 
+### 🔹 Excel Integration
+- Import data from Excel files into the system
+- Bulk-load or update inventory from structured spreadsheets
+- Use imported Excel data directly in:
+  - Inventory tables
+  - Dashboards
+  - AI assistant analysis
+- Basic validation/cleaning when reading from Excel to avoid corrupting the database
+
 ### 🔹 Dashboards & KPIs
 - Visual dashboards for:
   - Usage over time (by item or category)
@@ -51,7 +60,7 @@ The app tracks stock, expiry, consumption behavior, and exposes this through das
   - Explain inventory trends in plain language
   - Suggest actions (e.g., “which items should I reorder first?”)
   - Help formulate messages, notes, or procedures based on the current inventory state
-- The assistant works on top of the actual data in the database, not imaginary numbers
+- The assistant works on top of the actual data in the database and imported Excel files, not imaginary numbers
 
 ### 🔹 Authentication System
 - Login & registration using **SQLite**
@@ -140,6 +149,6 @@ Add any additional environment variables (e.g. DB path overrides) here if needed
 - More advanced analytics:
   - Forecasting demand based on historical usage
   - Automatic reorder suggestions
-- Exportable reports (Excel / CSV / PDF)
+- Exportable reports (CSV / PDF)
 - Optional integration with external ERP / POS systems
 - More detailed shrinkage tracking and reconciliation tooling
