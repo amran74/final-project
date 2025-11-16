@@ -1,147 +1,176 @@
 ﻿# Smart Inventory & AI Analytics Platform
 
-A full-featured inventory management and analytics system built with **Python** and **Streamlit**, designed around real retail workflows and data-driven decision-making.  
-The app tracks stock, expiry, consumption behavior, and exposes this through dashboards and KPIs for managers.
+A modular Python & Streamlit application for managing household or small-business inventory, planning recipes, minimizing waste, and generating insights with integrated AI assistance.
+
+The system is built as a **multi-page app with separate logic cores**, a clean UI, and SQLite as a lightweight embedded database.  
+It focuses on **data accuracy, expiry management, waste reduction, cost calculation, and daily planning**.
 
 ---
 
-## Features
+## 🚀 Features
 
-### 🔹 Inventory Management
-- Add, edit, delete items
+### 🧺 Inventory Management
+- Add, edit, and track inventory items  
 - Track:
-  - Quantity
-  - Expiry date
-  - Category / department
-  - Supplier (optional, if configured)
-- “Stable items” remain visible even at zero quantity (so critical items never disappear)
-- Automatic cleanup of expired items (configurable logic)
-- Monthly usage tracking per item
-
-### 🔹 Data & Analytics Focus
-- Monthly usage table and charts for each item and/or category
-- Identify:
-  - Fast-moving vs slow-moving products
-  - Items frequently running out
-  - Items commonly expiring on the shelf
-- Category-level summaries:
-  - Total quantity
-  - Average remaining shelf time
-  - Number of risky / low-stock items
-- Support for shrinkage / loss analysis via:
-  - Differences between expected and actual quantities
-  - Expired vs consumed breakdowns (where data is available)
-
-### 🔹 Excel Integration
-- Import data from Excel files into the system
-- Bulk-load or update inventory from spreadsheets
-- Use imported Excel data directly in:
-  - Inventory tables
-  - Dashboards
-  - AI assistant analysis
-- Basic validation when reading from Excel to avoid corrupting the database
-
-### 🔹 Dashboards & KPIs
-- Visual dashboards for:
-  - Usage over time (by item or category)
-  - Expiry trends
-  - Low-stock trends
-- KPIs for retail/pharmacy-style environments:
-  - Items below minimum threshold
-  - Items expiring soon
-  - Items with repeated expiry issues
-- Filters by date range, category, and item status
-
-### 🔹 AI Assistant
-- Integrated **OpenAI API** for contextual help:
-  - Explain inventory trends in simple language
-  - Suggest operational steps
-  - Help write notes or procedures
-- Works directly on top of the real database and Excel-imported data
-
-### 🔹 Authentication System
-- Login & registration through **SQLite**
-- Secure password hashing
-- Stores:
-  - Full name
-  - Phone number (for internal use)
-- Personalized greeting
-- Forgot-password page
-
-### 🔹 Multi-Page Streamlit App
-- Homepage with calendar + KPIs + quick navigation
-- Inventory CRUD interface
-- Dashboards & analytics
-- AI assistant interface
-- Top navigation bar on all pages
-
-### 🔹 UI/UX
-- Clean Streamlit-only design
-- Separation between operational, analytical, and AI components
-- Fully mouse-friendly workflow with zero technical requirements
+  - Expiry dates  
+  - Category / type  
+  - Quantity in base units (g / ml / pcs)  
+  - Price per unit  
+  - Cost per item  
+- Stable items remain visible at zero quantity  
+- Automatic cleanup of expired items on load  
+- Full inventory overview with color-coded freshness indicators  
+- Export inventory to **Excel/CSV**
 
 ---
 
-## Tech Stack
-
-- Python
-- Streamlit
-- SQLite
-- Pandas / NumPy
-- OpenAI API
-- Plotly / Matplotlib
-
----
-
-## Project Structure
-
-project/
-    home.py           - Login/Register
-    homepage.py       - Dashboard home with KPIs
-    inventory.py      - Inventory management
-    assistant.py      - AI assistant
-    dashboards.py     - Analytics visualizations
-    database.py       - SQLite models + utility functions
-    utils.py          - Shared helpers
-    README.md
+### 📊 Dashboards & Analytics
+- Usage over time (logged through recipe cooking, SmartCoach actions, and manual usage)  
+- Expiry risk visualization  
+- Low-stock detection  
+- Category-level metrics  
+- KPIs shown on homepage and dashboard page  
+- Interactive charts powered by **Plotly** and **Streamlit**
 
 ---
 
-## Installation
+### 🧠 SmartCoach (Waste Minimizer)
+A decision-engine that prioritizes your daily actions:
 
-1. Clone the repository
+- **Critical**: already expired or expires today  
+- **Urgent**: expires in 1–3 days  
+- **Preventive**: expires in 4–7 days  
+- **Recipe Rescue**: recipes that help consume at-risk items  
 
-    git clone <repo-url>
-    cd <project-folder>
+Actions supported:
+- Freeze  
+- Use  
+- Throw  
+- Dismiss / Snooze  
 
-2. Install dependencies
-
-    pip install -r requirements.txt
-
-3. Run the app
-
-    streamlit run home.py
-
----
-
-## Configuration
-
-Create a .env file in the project root:
-
-    OPENAI_API_KEY=your_openai_key_here
-
-Add additional environment variables as needed.
+All actions are logged into a dedicated tracking table.
 
 ---
 
-## Future Improvements
+### 🍽 Recipe System
+- Build recipes with:
+  - linked inventory ingredients  
+  - optional ingredients  
+  - yield percentages  
+  - equipment  
+  - cooking steps  
+- Automatic **cost estimation**  
+- **Coverage calculation**: how much of the recipe you can cook with current inventory  
+- When cooking:
+  - Inventory quantities are deducted  
+  - Usage events are logged  
+- Export recipe data for personal use
 
-- Role-based access (admin / manager / staff)
-- Integration with **business cashier / POS** so every order:
-    - Automatically reduces stock for the sold items
-    - Logs consumption into monthly usage tables
-    - Updates item costs and profitability metrics
-- Demand forecasting using historical usage
-- Automatic reorder suggestions
-- POS-level shrinkage reconciliation
-- PDF report exports for audits and management
+---
+
+### 🛒 Shopping List Planner
+- Builds shopping lists based on:
+  - Missing recipe ingredients  
+  - Low-stock inventory  
+- Helps plan replenishment and reduce shortages  
+
+---
+
+### 🤖 AI Assistant
+Uses the OpenAI API to:
+- Explain trends  
+- Recommend usage priorities  
+- Suggest new recipes based on inventory  
+- Generate notes, summaries, and ideas  
+- Works directly on current database state (no mock data)
+
+---
+
+### 🔐 Authentication
+- Login & register system  
+- Password hashing  
+- Each user gets their own inventory, recipes, and coach data  
+- Personalized homepage with KPIs and calendar
+
+---
+
+## 🧱 Technology Stack
+
+- **Python**  
+- **Streamlit** (multi-page UI)  
+- **SQLite**  
+- **Pandas / NumPy**  
+- **Plotly**  
+- **OpenAI API**  
+
+---
+
+## 📁 Project Structure (Accurate)
+
+\\\
+App.py                   → Main app router
+home.py                  → Login / Register / Session
+
+CalendarView.py          → Homepage (KPIs + calendar)
+Inventory.py             → Inventory UI
+RecipesPage.py           → Recipes UI
+Shopping.py              → Shopping list UI
+SmartCoach.py            → SmartCoach UI
+dashboard.py             → Dashboards UI
+
+inventory_core.py        → Inventory logic
+recipes_core.py          → Recipe logic & cost engine
+shopping_core.py         → Shopping logic
+smartcoach_core.py       → SmartCoach logic
+dashboards_core.py       → KPI and chart logic
+ai_commands_core.py      → AI utility commands
+pricing.py               → Price calculation helpers
+db.py                    → SQLite layer & schema handling
+reset_db.py              → DB utilities
+fix_schema.py            → Schema repair scripts
+
+assets/                  → Images & banners
+thumbs/                  → Icons
+old/                     → Legacy prototype code
+\\\
+
+---
+
+## 📦 Installation
+
+\\\
+pip install -r requirements.txt
+streamlit run App.py
+\\\
+
+Create a .env file:
+
+\\\
+OPENAI_API_KEY=your_openai_key_here
+\\\
+
+---
+
+## ⏭ Roadmap (Realistic)
+
+- POS / cashier integration  
+- Demand forecasting using historical logs  
+- Auto-generated reorder suggestions  
+- Multi-store support  
+- PDF reporting  
+- Excel **import** (future)  
+
+---
+
+## 🎯 Summary
+
+This project demonstrates:
+
+- Clean modular architecture  
+- Separation of UI and core logic  
+- Real-time expiry and cost management  
+- Custom analytics layer  
+- AI-driven guidance  
+- Full lifecycle: inventory → recipes → usage logs → dashboards → recommendations  
+
+A practical, real product — not a toy demo.
