@@ -108,30 +108,30 @@ Uses the OpenAI API to:
 ## 📁 Project Structure (Accurate)
 
 \\\
-App.py                   → Main app router
-home.py                  → Login / Register / Session
+App.py                  → Main app router
+home.py                 → Login / Register / Session
 
-CalendarView.py          → Homepage (KPIs + calendar)
-Inventory.py             → Inventory UI
-RecipesPage.py           → Recipes UI
-Shopping.py              → Shopping list UI
-SmartCoach.py            → SmartCoach UI
-dashboard.py             → Dashboards UI
+CalendarView.py         → Homepage (KPIs + calendar)
+Inventory.py            → Inventory UI
+RecipesPage.py          → Recipes UI
+Shopping.py             → Shopping list UI
+SmartCoach.py           → SmartCoach UI
+dashboard.py            → Dashboards UI
 
-inventory_core.py        → Inventory logic
-recipes_core.py          → Recipe logic & cost engine
-shopping_core.py         → Shopping logic
-smartcoach_core.py       → SmartCoach logic
-dashboards_core.py       → KPI and chart logic
-ai_commands_core.py      → AI utility commands
-pricing.py               → Price calculation helpers
-db.py                    → SQLite layer & schema handling
-reset_db.py              → DB utilities
-fix_schema.py            → Schema repair scripts
+inventory_core.py       → Inventory logic
+recipes_core.py         → Recipe logic & cost engine
+shopping_core.py        → Shopping logic
+smartcoach_core.py      → SmartCoach logic
+dashboards_core.py      → KPI and chart logic
+ai_commands_core.py     → AI utility commands
+pricing.py              → Price calculation helpers
+db.py                   → SQLite layer & schema handling
+reset_db.py             → DB utilities
+fix_schema.py           → Schema repair scripts
 
-assets/                  → Images & banners
-thumbs/                  → Icons
-old/                     → Legacy prototype code
+assets/                 → Images & banners
+thumbs/                 → Icons
+old/                    → Legacy prototype code
 \\\
 
 ---
