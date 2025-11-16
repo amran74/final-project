@@ -34,60 +34,51 @@ The app tracks stock, expiry, consumption behavior, and exposes this through das
 
 ### 🔹 Excel Integration
 - Import data from Excel files into the system
-- Bulk-load or update inventory from structured spreadsheets
+- Bulk-load or update inventory from spreadsheets
 - Use imported Excel data directly in:
   - Inventory tables
   - Dashboards
   - AI assistant analysis
-- Basic validation/cleaning when reading from Excel to avoid corrupting the database
+- Basic validation when reading from Excel to avoid corrupting the database
 
 ### 🔹 Dashboards & KPIs
 - Visual dashboards for:
   - Usage over time (by item or category)
   - Expiry trends
   - Low-stock trends
-- KPIs designed for retail / pharmacy environments, for example:
-  - Number of items below minimum threshold
-  - Number of items expiring this week / month
+- KPIs for retail/pharmacy-style environments:
+  - Items below minimum threshold
+  - Items expiring soon
   - Items with repeated expiry issues
-- Filters by:
-  - Date range
-  - Category / department
-  - Status (OK / low / expiring / expired)
+- Filters by date range, category, and item status
 
 ### 🔹 AI Assistant
 - Integrated **OpenAI API** for contextual help:
-  - Explain inventory trends in plain language
-  - Suggest actions (e.g., “which items should I reorder first?”)
-  - Help formulate messages, notes, or procedures based on the current inventory state
-- The assistant works on top of the actual data in the database and imported Excel files, not imaginary numbers
+  - Explain inventory trends in simple language
+  - Suggest operational steps
+  - Help write notes or procedures
+- Works directly on top of the real database and Excel-imported data
 
 ### 🔹 Authentication System
-- Login & registration using **SQLite**
-- Password hashing for safer storage
+- Login & registration through **SQLite**
+- Secure password hashing
 - Stores:
   - Full name
-  - Phone number (for identification inside the app, not for messaging)
-- Personalized greetings on login
-- “Forgot password” flow using stored data
+  - Phone number (for internal use)
+- Personalized greeting
+- Forgot-password page
 
 ### 🔹 Multi-Page Streamlit App
-- Home / Dashboard page with:
-  - Calendar widget
-  - Quick navigation to main modules
-  - High-level KPIs
-- Inventory page for CRUD operations
-- Analytics / Dashboards page for charts and tables
-- AI Assistant page for conversational interaction with your data
-- Top navigation bar visible on all pages
+- Homepage with calendar + KPIs + quick navigation
+- Inventory CRUD interface
+- Dashboards & analytics
+- AI assistant interface
+- Top navigation bar on all pages
 
 ### 🔹 UI/UX
-- Clean Streamlit-based interface
-- Logical separation between:
-  - Operational actions (add/edit items)
-  - Analytical views (dashboards)
-  - Intelligent help (AI assistant)
-- Designed to be usable with mouse only, no technical knowledge required
+- Clean Streamlit-only design
+- Separation between operational, analytical, and AI components
+- Fully mouse-friendly workflow with zero technical requirements
 
 ---
 
@@ -98,20 +89,20 @@ The app tracks stock, expiry, consumption behavior, and exposes this through das
 - SQLite
 - Pandas / NumPy
 - OpenAI API
-- Plotly / Matplotlib (for charts and visualizations)
+- Plotly / Matplotlib
 
 ---
 
 ## Project Structure
 
 project/
-    home.py           - Login/Register screen
-    homepage.py       - Main homepage with calendar + KPIs
-    inventory.py      - Inventory management UI + logic
-    assistant.py      - AI assistant interface
-    dashboards.py     - Analytics & charts
-    database.py       - SQLite models & DB utilities
-    utils.py          - Shared helper functions
+    home.py           - Login/Register
+    homepage.py       - Dashboard home with KPIs
+    inventory.py      - Inventory management
+    assistant.py      - AI assistant
+    dashboards.py     - Analytics visualizations
+    database.py       - SQLite models + utility functions
+    utils.py          - Shared helpers
     README.md
 
 ---
@@ -135,20 +126,22 @@ project/
 
 ## Configuration
 
-Create a .env file in the project root with:
+Create a .env file in the project root:
 
     OPENAI_API_KEY=your_openai_key_here
 
-Add any additional environment variables (e.g. DB path overrides) here if needed.
+Add additional environment variables as needed.
 
 ---
 
 ## Future Improvements
 
 - Role-based access (admin / manager / staff)
-- More advanced analytics:
-  - Forecasting demand based on historical usage
-  - Automatic reorder suggestions
-- Exportable reports (CSV / PDF)
-- Optional integration with external ERP / POS systems
-- More detailed shrinkage tracking and reconciliation tooling
+- Integration with **business cashier / POS** so every order:
+    - Automatically reduces stock for the sold items
+    - Logs consumption into monthly usage tables
+    - Updates item costs and profitability metrics
+- Demand forecasting using historical usage
+- Automatic reorder suggestions
+- POS-level shrinkage reconciliation
+- PDF report exports for audits and management
