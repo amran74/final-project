@@ -1,4 +1,5 @@
-# db.py — safe schema, monthly KPIs via usage_log, correct money_lost with fallbacks11
+# db.py — schema + WAL/timeout hardening and safe defaults for NOT NULL columns
+
 import sqlite3
 from datetime import datetime, date
 from typing import Optional, Tuple
@@ -10,8 +11,18 @@ DB_PATH = "inventory.db"
 # ==============================
 
 def get_connection() -> sqlite3.Connection:
-    con = sqlite3.connect(DB_PATH)
-    con.execute("PRAGMA foreign_keys = ON")
+    """
+    Unified connection with WAL + busy_timeout to reduce 'database is locked'.
+    """
+    con = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
+    try:
+        con.execute("PRAGMA foreign_keys = ON")
+        con.execute("PRAGMA journal_mode = WAL")
+        con.execute("PRAGMA synchronous = NORMAL")
+        con.execute("PRAGMA busy_timeout = 30000")
+        con.execute("PRAGMA temp_store = MEMORY")
+    except Exception:
+        pass
     return con
 
 # ==============================
@@ -43,23 +54,20 @@ def create_tables() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             phone TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
-            name TEXT NOT NULL
+            name TEXT NOT NULL,
+            secret_question TEXT,
+            secret_answer TEXT
         )
     """)
 
-    # Users extras
-    _ensure_column(c, "users", "secret_question",
-                   'ALTER TABLE "users" ADD COLUMN "secret_question" TEXT')
-    _ensure_column(c, "users", "secret_answer",
-                   'ALTER TABLE "users" ADD COLUMN "secret_answer" TEXT')
-
     # --- Inventory (base) ---
+    # Make expiration NOT NULL with a safe default of empty string.
     c.execute("""
         CREATE TABLE IF NOT EXISTS inventory (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             name TEXT NOT NULL,
-            expiration TEXT NOT NULL,
+            expiration TEXT NOT NULL DEFAULT '',
             type TEXT,
             amount REAL DEFAULT 1,
             unit TEXT DEFAULT 'pcs',
@@ -71,33 +79,26 @@ def create_tables() -> None:
             money_lost REAL DEFAULT 0.0,
             frozen_until TEXT,
             perishability INTEGER DEFAULT 2,
+            kind TEXT DEFAULT 'ingredient',
+            base_unit TEXT DEFAULT 'pcs',
+            base_amount REAL DEFAULT 0.0,
+            total_cost REAL DEFAULT 0.0,
+            price_per_base REAL DEFAULT 0.0,
+            storage_state TEXT DEFAULT 'fresh',
+            frozen_at TEXT,
+            thawed_at TEXT,
+            frozen_days_accum INTEGER DEFAULT 0,
+            thaw_shelf_life_days INTEGER,
+            recipe_note TEXT,
             FOREIGN KEY(user_id) REFERENCES users(id)
         )
     """)
 
-    # Modern extras used by the upgraded Inventory page (additive, safe)
-    _ensure_column(c, "inventory", "kind",
-                   'ALTER TABLE "inventory" ADD COLUMN "kind" TEXT DEFAULT "ingredient"')
-    _ensure_column(c, "inventory", "base_unit",
-                   'ALTER TABLE "inventory" ADD COLUMN "base_unit" TEXT DEFAULT "pcs"')
-    _ensure_column(c, "inventory", "base_amount",
-                   'ALTER TABLE "inventory" ADD COLUMN "base_amount" REAL DEFAULT 0.0')
-    _ensure_column(c, "inventory", "total_cost",
-                   'ALTER TABLE "inventory" ADD COLUMN "total_cost" REAL DEFAULT 0.0')
-    _ensure_column(c, "inventory", "price_per_base",
-                   'ALTER TABLE "inventory" ADD COLUMN "price_per_base" REAL DEFAULT 0.0')
-    _ensure_column(c, "inventory", "storage_state",
-                   'ALTER TABLE "inventory" ADD COLUMN "storage_state" TEXT DEFAULT "fresh"')
-    _ensure_column(c, "inventory", "frozen_at",
-                   'ALTER TABLE "inventory" ADD COLUMN "frozen_at" TEXT')
-    _ensure_column(c, "inventory", "thawed_at",
-                   'ALTER TABLE "inventory" ADD COLUMN "thawed_at" TEXT')
-    _ensure_column(c, "inventory", "frozen_days_accum",
-                   'ALTER TABLE "inventory" ADD COLUMN "frozen_days_accum" INTEGER DEFAULT 0')
-    _ensure_column(c, "inventory", "thaw_shelf_life_days",
-                   'ALTER TABLE "inventory" ADD COLUMN "thaw_shelf_life_days" INTEGER')
-    _ensure_column(c, "inventory", "recipe_note",
-                   'ALTER TABLE "inventory" ADD COLUMN "recipe_note" TEXT')
+    # Backfill: if any legacy DB has NULL in expiration, coalesce to ''.
+    try:
+        c.execute("UPDATE inventory SET expiration='' WHERE expiration IS NULL")
+    except Exception:
+        pass
 
     # --- Usage log (base; legacy compatible) ---
     c.execute("""
@@ -105,26 +106,17 @@ def create_tables() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             item_id INTEGER,
-            used_date TEXT,       -- legacy
-            used_count INTEGER    -- legacy
+            used_date TEXT,
+            used_count INTEGER,
+            event_type TEXT,
+            quantity REAL,
+            unit TEXT,
+            step_count INTEGER,
+            value_shekel REAL,
+            ts TEXT,
+            month_key TEXT
         )
     """)
-
-    # Usage_log extras (modern fields; additive, safe)
-    _ensure_column(c, "usage_log", "event_type",
-                   'ALTER TABLE "usage_log" ADD COLUMN "event_type" TEXT')
-    _ensure_column(c, "usage_log", "quantity",
-                   'ALTER TABLE "usage_log" ADD COLUMN "quantity" REAL')
-    _ensure_column(c, "usage_log", "unit",
-                   'ALTER TABLE "usage_log" ADD COLUMN "unit" TEXT')
-    _ensure_column(c, "usage_log", "step_count",
-                   'ALTER TABLE "usage_log" ADD COLUMN "step_count" INTEGER')
-    _ensure_column(c, "usage_log", "value_shekel",
-                   'ALTER TABLE "usage_log" ADD COLUMN "value_shekel" REAL')
-    _ensure_column(c, "usage_log", "ts",
-                   'ALTER TABLE "usage_log" ADD COLUMN "ts" TEXT')
-    _ensure_column(c, "usage_log", "month_key",
-                   'ALTER TABLE "usage_log" ADD COLUMN "month_key" TEXT')
 
     # --- Shopping list (base) ---
     c.execute("""
@@ -240,13 +232,9 @@ def _today_keys():
     ts = datetime.now()
     return ts.isoformat(timespec="seconds"), ts.strftime("%Y-%m")
 
-# ---- price helpers (so money_lost isn’t stuck at 0) ----
+# ---- price helpers ----
 
 def _effective_price_per_base(c: sqlite3.Cursor, item_id: int) -> Tuple[float, Optional[str]]:
-    """
-    Try to read price_per_base and base_unit if those columns exist.
-    Returns (price_per_base, base_unit or None). If missing, returns (0.0, None).
-    """
     try:
         c.execute("SELECT price_per_base, base_unit FROM inventory WHERE id=?", (item_id,))
         row = c.fetchone()
@@ -254,27 +242,18 @@ def _effective_price_per_base(c: sqlite3.Cursor, item_id: int) -> Tuple[float, O
             ppb, bu = row
             return float(ppb or 0.0), (bu or None)
     except sqlite3.OperationalError:
-        # columns don't exist in this DB; fine
         pass
     return 0.0, None
 
 def _compute_loss_shekel(c: sqlite3.Cursor, item_id: int, qty: float, unit: str, ppu: float) -> float:
-    """
-    Compute lost value with smart fallback:
-      1) use price_per_unit * qty when price_per_unit > 0
-      2) else try price_per_base * qty_in_base (g/ml/pcs)
-    """
     if (ppu or 0.0) > 0:
         return round((ppu or 0.0) * (qty or 0.0), 2)
 
-    # Fallback to price_per_base if present
     qty_base, qty_base_unit, _ = _normalize_quantity(qty, unit)
     ppb, inv_base_unit = _effective_price_per_base(c, item_id)
 
     if ppb > 0 and inv_base_unit and inv_base_unit.lower().strip() == qty_base_unit:
         return round(ppb * qty_base, 2)
-
-    # Nothing to go on
     return 0.0
 
 # ==============================
@@ -414,7 +393,6 @@ def expire_all(item_id: int) -> dict:
         return {"expired_step_added": 0, "lost_nis_total": float(money_lost or 0.0), "remaining": 0.0, "unit": unit}
 
     step_inc = _compute_step_count(amount, unit)
-    # compute loss using the same fallback logic
     lost_value = _compute_loss_shekel(c, item_id, amount, unit, ppu)
 
     new_expired = (expired_count or 0) + step_inc
@@ -488,6 +466,5 @@ def reset_monthly_counters() -> None:
     conn.commit()
     conn.close()
 
-# Run migrations ONLY when executed directly, not on import
 if __name__ == "__main__":
     create_tables()

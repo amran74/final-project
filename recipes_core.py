@@ -3,12 +3,64 @@
 # Inventory schema tolerant: prefers 'inventory', falls back to 'items', adapts to columns present.
 # Includes nutrition auto-fill for AI drafts, safe step-count wrapper, create-or-link inventory for manual rows,
 # and delete_recipe.
+#
+# Lock-avoidance upgrades:
+#   • Resolve/link/create inventory for manual rows BEFORE the main transaction
+#   • One short BEGIN IMMEDIATE per operation, wrapped in a light retry on SQLITE_BUSY
+#   • No writes to other tables inside an open write TX unless that’s the one TX we’re doing
 
 from __future__ import annotations
-import os, re, json, math, random, difflib, unicodedata, sqlite3
+import os, re, json, math, random, difflib, unicodedata, sqlite3, time
 from typing import Dict, List, Tuple, Optional
 
 from db import get_connection, _today_keys, _compute_step_count
+
+# ----------------------------- tiny transaction retry -------------------------
+
+def _txn_retry(begin_sql: str, work_fn, max_wait_ms: int = 3000, sleep_ms: int = 60):
+    """
+    Run work_fn(conn, cursor) inside a single transaction started with begin_sql.
+    Retries on SQLITE_BUSY/locked up to max_wait_ms total.
+    """
+    deadline = time.time() + (max_wait_ms / 1000.0)
+    last_exc = None
+    while time.time() < deadline:
+        conn = get_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute(begin_sql)
+            work_fn(conn, cur)
+            conn.commit()
+            conn.close()
+            return
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            if "locked" in msg or "busy" in msg:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.close()
+                last_exc = e
+                time.sleep(sleep_ms / 1000.0)
+                continue
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            conn.close()
+            raise
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            conn.close()
+            raise
+    # exhausted retries
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Transaction retry exhausted without specific error.")
 
 # ----------------------------- Safe wrapper for step counter ------------------
 
@@ -34,7 +86,7 @@ MULTIPLIER_TO_BASE = {"pcs":1.0, "mg":0.001, "g":1.0, "kg":1000.0, "ml":1.0, "l"
 
 DEFAULT_STAPLES = [
     "water","salt","black pepper","olive oil","vegetable oil","sugar",
-    "flour","baking powder","baking soda","vinegar","garlic","onion"
+    "flour","baking powder","baking soda","vinegar","garlic","onion","yeast","tomato sauce"
 ]
 SAFE_DEFAULT_STAPLES = set(DEFAULT_STAPLES)
 
@@ -153,7 +205,7 @@ def _inventory_schema() -> dict:
         "user_id": pick("user_id"),
         "name": pick("name"),
         "base_unit": pick("base_unit", "unit", "uom"),
-        "amount": pick("base_amount", "quantity_in_base", "qty_base"),
+        "amount": pick("base_amount", "quantity_in_base", "qty_base", "amount"),
         "price_per_base": pick("price_per_base", "price_per_unit", "ppu"),
         "type": pick("type", "category"),
         "stable": pick("stable", "is_stable"),
@@ -320,7 +372,6 @@ def _ensure_inventory_item(user_id:int, name:str, unit_hint:str="pcs") -> Tuple[
     if not sch["table"]:
         raise RuntimeError("Inventory table not found; cannot create ingredient link.")
 
-    # Try to find exact same name first
     conn = get_connection(); c = conn.cursor()
     try:
         if sch["user_id"] and sch["name"]:
@@ -331,7 +382,6 @@ def _ensure_inventory_item(user_id:int, name:str, unit_hint:str="pcs") -> Tuple[
                 conn.close()
                 return int(r[0]), (r[1] or unit_hint or "pcs")
 
-        # Build dynamic insert with safe defaults for existing columns
         cols_vals = {}
         if sch["user_id"]:                  cols_vals[sch["user_id"]] = user_id
         if sch["name"]:                     cols_vals[sch["name"]] = name
@@ -340,12 +390,12 @@ def _ensure_inventory_item(user_id:int, name:str, unit_hint:str="pcs") -> Tuple[
         if sch["price_per_base"]:           cols_vals[sch["price_per_base"]] = 0.0
         if sch["type"]:                     cols_vals[sch["type"]] = "Other"
         if sch["stable"]:                   cols_vals[sch["stable"]] = 0
-        if sch["expires"]:                  cols_vals[sch["expires"]] = None
+        # FIX: expiration is NOT NULL in your DB. Insert empty string, not NULL.
+        if sch["expires"]:                  cols_vals[sch["expires"]] = ""
         if sch["token_cache"]:              cols_vals[sch["token_cache"]] = json.dumps({"alias": normalize_name(name)})
         if sch["total_cost"]:               cols_vals[sch["total_cost"]] = 0.0
         if sch["used_count"]:               cols_vals[sch["used_count"]] = 0
 
-        # Try full insert
         cols = ", ".join(cols_vals.keys())
         ph   = ", ".join(["?"]*len(cols_vals))
         c.execute(f"INSERT INTO {sch['table']}({cols}) VALUES ({ph})", tuple(cols_vals.values()))
@@ -353,7 +403,7 @@ def _ensure_inventory_item(user_id:int, name:str, unit_hint:str="pcs") -> Tuple[
         conn.commit(); conn.close()
         return iid, (cols_vals.get(sch["base_unit"]) or unit_hint or "pcs")
     except Exception:
-        # As last resort, try minimal (user_id, name)
+        # fallback minimal insert
         try:
             if sch["user_id"] and sch["name"]:
                 c.execute(f"INSERT INTO {sch['table']}({sch['user_id']},{sch['name']}) VALUES (?,?)", (user_id, name))
@@ -670,7 +720,6 @@ def cook_recipe(user_id:int, recipe_id:int, servings:int, deduct_optional:bool=T
     scale=max(0.001,float(servings)/max(1,dsv))
 
     comps=get_recipe_components(recipe_id)
-    conn=get_connection(); c=conn.cursor()
     ts, mk = _today_keys()
 
     sch = _inventory_schema()
@@ -678,22 +727,25 @@ def cook_recipe(user_id:int, recipe_id:int, servings:int, deduct_optional:bool=T
     if not sch["table"] or not amt_col or not unit_col:
         return False, "Inventory table is missing required columns."
 
-    try:
-        c.execute("BEGIN IMMEDIATE")
+    def _work(conn, c):
         for (_cid, ing_id, nm, bu, _have, _ppb, _inv_type,
              q_base_def, is_staple, is_opt, yield_pct, wastage_pct, _cat, _sku, _subs, _note, _tc) in comps:
 
             staple = (bool(is_staple) and _is_staple_name(nm or ""))
-            if staple: continue
-            if bool(is_opt) and not deduct_optional: continue
+            if staple: 
+                continue
+            if bool(is_opt) and not deduct_optional:
+                continue
 
             needed_raw=float(q_base_def or 0.0)*scale
             need = (needed_raw * (100.0 + float(wastage_pct or 0.0))/100.0) / max(0.01, float(yield_pct or 100)/100.0)
-            if need<=0: continue
+            if need<=0: 
+                continue
 
             c.execute(f"SELECT id, COALESCE({amt_col},0), COALESCE({unit_col}, 'pcs'), COALESCE({used_col},0) FROM {sch['table']} WHERE id=?", (ing_id,))
             r=c.fetchone()
-            if not r: raise RuntimeError(f"Missing inventory item: {nm}")
+            if not r: 
+                raise RuntimeError(f"Missing inventory item: {nm}")
             cur_id, cur_amt, base_unit, used_count = int(r[0]), float(r[1] or 0.0), (r[2] or bu), int(r[3] or 0)
 
             if cur_amt + 1e-9 < need:
@@ -719,11 +771,11 @@ def cook_recipe(user_id:int, recipe_id:int, servings:int, deduct_optional:bool=T
                 VALUES (?, ?, 'used', ?, ?, ?, 0.0, ?, ?)
                 """,
                 (user_id, cur_id, float(need), base_unit, int(step), ts, mk))
-        conn.commit()
+
+    try:
+        _txn_retry("BEGIN IMMEDIATE", _work, max_wait_ms=3000)
     except Exception as e:
-        conn.rollback(); conn.close()
         return False, f"Cook failed: {e}"
-    conn.close()
     return True, f"Cooked {title} for {servings} serving(s)."
 
 # ----------------------------- Create / persist -------------------------------
@@ -733,11 +785,48 @@ def create_recipe_atomic(user_id:int, meta:dict, components:List[dict], steps:Li
     Supports two component shapes from the UI builder:
       A) inventory-picked rows: {inv_id, qty_per_serv, staple, optional, yield_pct, wastage_pct, ...}
       B) manual rows:           {name, unit, qty_per_serv, ...}
-    Ensures ingredient_item_id is always a valid inventory id.
+    Ensures ingredient_item_id is always a valid inventory id and avoids nested writers.
     """
-    conn=get_connection(); c=conn.cursor()
-    try:
-        c.execute("BEGIN IMMEDIATE")
+    staples=set(normalize_name(s) for s in _cached_staples_raw())
+
+    # Pass 1: resolve or create inventory items OUTSIDE the main TX
+    resolved: List[Tuple[int,float,int,int,float,float,str,str,str,str]] = []
+    for comp in components:
+        ing_id=None; bu=None
+
+        if comp.get("inv_id"):  # chosen from inventory
+            ing_id=int(comp["inv_id"])
+            _, bu, *_ = _inv_fields_for_component(ing_id)
+            if not bu: bu="pcs"
+        else:                    # manual row → link or create with its own short write
+            nm=(comp.get("name") or "").strip()
+            unit=(comp.get("unit") or "pcs")
+            guess=link_inventory(user_id, nm, unit_hint=unit)
+            if guess:
+                ing_id, bu = int(guess[0]), guess[1]
+            else:
+                ing_id, bu = _ensure_inventory_item(user_id, nm, unit_hint=unit)
+
+        qty_ui=float(comp.get("qty_per_serv",0))*int(meta["default_servings"])
+        need_base,_=to_base(qty_ui, bu)
+
+        nm_for_staple = comp.get("name","") if "name" in comp else _inv_fields_for_component(ing_id)[0]
+        is_staple = 1 if (comp.get("staple") and normalize_name(nm_for_staple) in staples) else 0
+
+        resolved.append((
+            int(ing_id), float(need_base), is_staple,
+            1 if comp.get("optional") else 0,
+            float(comp.get("yield_pct",100)),
+            float(comp.get("wastage_pct",0)),
+            comp.get("category","") or "",
+            comp.get("vendor_sku","") or "",
+            json.dumps(comp.get("subs",[]) or []),
+            comp.get("note","") or ""
+        ))
+
+    rid_holder = {"rid": None}
+
+    def _work(conn, c):
         c.execute(
             """
             INSERT INTO recipes_catalog(user_id,title,default_servings,time_min,difficulty,course,cuisine,diet,allergens,tags,
@@ -747,63 +836,36 @@ def create_recipe_atomic(user_id:int, meta:dict, components:List[dict], steps:Li
             (user_id, meta["title"].strip(), int(meta["default_servings"]), int(meta["time_min"]), meta["difficulty"],
              meta.get("course",""), meta.get("cuisine",""), meta.get("diet",""), meta.get("allergens",""),
              meta.get("tags",""), float(meta.get("kcal",0)), float(meta.get("protein",0)),
-             float(meta.get("carbs",0)), float(meta.get("fat",0)), meta.get("notes","")))
+             float(meta.get("carbs",0)), float(meta.get("fat",0)), meta.get("notes",""))
+        )
         rid=int(c.lastrowid)
+        rid_holder["rid"] = rid
 
-        staples=set(normalize_name(s) for s in _cached_staples_raw())
-
-        for comp in components:
-            ing_id=None; bu=None
-
-            if comp.get("inv_id"):  # (A) chosen from inventory
-                ing_id=int(comp["inv_id"])
-                _, bu, *_ = _inv_fields_for_component(ing_id)
-                if not bu: bu="pcs"
-            else:                    # (B) manual row → link or create
-                nm=(comp.get("name") or "").strip()
-                unit=(comp.get("unit") or "pcs")
-                guess=link_inventory(user_id, nm, unit_hint=unit)
-                if guess:
-                    ing_id, bu = int(guess[0]), guess[1]
-                else:
-                    ing_id, bu = _ensure_inventory_item(user_id, nm, unit_hint=unit)
-
-            qty_ui=float(comp.get("qty_per_serv",0))*int(meta["default_servings"])
-            need_base,_=to_base(qty_ui, bu)
-
-            nm_for_staple = comp.get("name","") if "name" in comp else _inv_fields_for_component(ing_id)[0]
-            is_staple = 1 if (comp.get("staple") and normalize_name(nm_for_staple) in staples) else 0
-
+        for (ing_id, need_base, is_staple, is_opt, y, w, cat, sku, subs_j, note) in resolved:
             c.execute(
                 """
                 INSERT INTO recipes_catalog_components
                 (recipe_id,ingredient_item_id,quantity_base,is_staple,is_optional,yield_pct,wastage_pct,category,vendor_sku,substitutions,note)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 """,
-                (rid, int(ing_id), float(need_base),
-                 is_staple,
-                 1 if comp.get("optional") else 0,
-                 float(comp.get("yield_pct",100)),
-                 float(comp.get("wastage_pct",0)),
-                 comp.get("category",""),
-                 comp.get("vendor_sku",""),
-                 json.dumps(comp.get("subs",[])),
-                 comp.get("note","")))
+                (rid, ing_id, need_base, is_staple, is_opt, y, w, cat, sku, subs_j, note)
+            )
 
         for i, step in enumerate(steps, start=1):
-            equip = step.get("equipment",[])
+            equip = step.get("equipment",[]) or []
             c.execute(
                 """
                 INSERT INTO recipe_steps(recipe_id,position,text,minutes,equipment,photo)
                 VALUES (?,?,?,?,?,?)
                 """,
-                (rid, i, (step.get("text","") or "").strip(), int(step.get("minutes",0)),
-                 ",".join(equip), step.get("photo","")))
-        conn.commit()
-    except Exception:
-        conn.rollback(); conn.close(); raise
-    conn.close()
-    return rid
+                (rid, i, (step.get("text","") or "").strip(),
+                 int(step.get("minutes",0)),
+                 ",".join(equip),
+                 step.get("photo","") or "")
+            )
+
+    _txn_retry("BEGIN IMMEDIATE", _work, max_wait_ms=3000)
+    return int(rid_holder["rid"])
 
 def persist_ai_recipe(user_id:int, draft:dict) -> int:
     meta = {
@@ -1067,24 +1129,22 @@ def repair_links_for_recipe(recipe_id:int) -> int:
         return 0
     comps = get_recipe_components(recipe_id)
     changed = 0
-    conn=get_connection(); c=conn.cursor()
-    try:
-        c.execute("BEGIN IMMEDIATE")
+
+    def _work(conn, c):
+        nonlocal changed
         for (_cid, ing_id, nm, bu, have, _ppb, _inv_type,
              _q, is_staple, _is_opt, _y, _w, _cat, _sku, _subs, _note, _tc) in comps:
             guess = link_inventory(user_id, nm, unit_hint=bu)
-            if not guess: continue
+            if not guess: 
+                continue
             new_id = int(guess[0])
             if new_id != int(ing_id or 0):
                 alt_info = _read_inventory_row(new_id)
                 if float(alt_info.get("amount",0.0) or 0.0) > float(have or 0.0):
                     c.execute("UPDATE recipes_catalog_components SET ingredient_item_id=? WHERE id=?", (new_id, _cid))
                     changed += 1
-        conn.commit()
-    except Exception:
-        conn.rollback(); changed=0
-    finally:
-        conn.close()
+
+    _txn_retry("BEGIN IMMEDIATE", _work, max_wait_ms=3000)
     return changed
 
 def diagnose_recipe_links(recipe_id:int) -> List[Dict]:
@@ -1110,24 +1170,18 @@ def diagnose_recipe_links(recipe_id:int) -> List[Dict]:
 
 def delete_recipe(user_id: int, recipe_id: int) -> bool:
     """Hard-delete a recipe and its children (components + steps)."""
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
+    def _work(conn, cur):
         cur.execute("SELECT 1 FROM recipes_catalog WHERE id=? AND user_id=?", (recipe_id, user_id))
         if not cur.fetchone():
-            conn.close()
-            return False
-        cur.execute("BEGIN IMMEDIATE")
+            raise RuntimeError("Recipe not found or not owned by user")
         cur.execute("DELETE FROM recipe_steps WHERE recipe_id=?", (recipe_id,))
         cur.execute("DELETE FROM recipes_catalog_components WHERE recipe_id=?", (recipe_id,))
         cur.execute("DELETE FROM recipes_catalog WHERE id=? AND user_id=?", (recipe_id, user_id))
-        conn.commit()
+    try:
+        _txn_retry("BEGIN IMMEDIATE", _work, max_wait_ms=3000)
         return True
     except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+        return False
 
 # ----------------------------- Misc -------------------------------------------
 

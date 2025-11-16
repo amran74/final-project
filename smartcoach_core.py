@@ -424,7 +424,7 @@ def mark_thrown_now(user_id: int, item_id: int, qty_base: float) -> Tuple[bool, 
     conn = get_connection(); c = conn.cursor()
     try:
         before, after = _consume_base_amount(c, item_id, -abs(qty_base))
-        steps = max(1, int(round(abs(qty_base))))
+        steps = max(1, int(round(abs(qty_base))))  # kept for legacy logs
         c.execute("UPDATE inventory SET expired_count=COALESCE(expired_count,0)+? WHERE id=?", (steps, item_id))
         c.execute("""
           INSERT INTO usage_log(user_id, item_id, event_type, step_count, ts)
@@ -455,16 +455,40 @@ def _has_item_like(user_id: int, needles: List[str]) -> bool:
     return any(n in names for n in needles)
 
 def _most_frequently_expired(user_id: int) -> Optional[Tuple[str, int]]:
+    """
+    Return (item_name, discard_events_count) for the last 60 days.
+
+    Old implementation summed usage_log.step_count, which inflated counts when
+    grams/ml were logged as 'steps'. We now count actual discard *events*
+    from coach_actions_log (action='throw'). If that table is empty, we fall
+    back to COUNT(*) of usage_log rows for event_type='expired'.
+    """
     conn = get_connection(); c = conn.cursor()
     try:
         since = (date.today() - timedelta(days=60)).strftime("%Y-%m-%d")
+
+        # Preferred: coach_actions_log (accurate one-row-per-action)
         c.execute("""
-          SELECT i.name, SUM(COALESCE(u.step_count,0)) as s
+          SELECT i.name, COUNT(*) as cnt
+            FROM coach_actions_log cal
+            JOIN inventory i ON i.id = cal.item_id
+           WHERE cal.user_id=? AND cal.action='throw' AND substr(cal.ts,1,10)>=?
+           GROUP BY i.name
+           ORDER BY cnt DESC
+           LIMIT 1
+        """, (user_id, since))
+        row = c.fetchone()
+        if row and int(row[1] or 0) > 0:
+            return (row[0], int(row[1]))
+
+        # Fallback: usage_log (count rows, not step_count)
+        c.execute("""
+          SELECT i.name, COUNT(*) as cnt
             FROM usage_log u
             JOIN inventory i ON i.id = u.item_id
            WHERE u.user_id=? AND u.event_type='expired' AND substr(u.ts,1,10)>=?
            GROUP BY i.name
-           ORDER BY s DESC
+           ORDER BY cnt DESC
            LIMIT 1
         """, (user_id, since))
         row = c.fetchone()
@@ -481,7 +505,7 @@ def quick_tips(user_id: int, limit: int = 3) -> List[str]:
     frequent = _most_frequently_expired(user_id)
     if frequent:
         item, count = frequent
-        tips.append(f"“{item}” expired {count} times recently. Buy smaller packs or plan a recipe when you add it.")
+        tips.append(f"“{item}” expired {count} time(s) recently. Buy smaller packs or plan a recipe when you add it.")
     if _has_item_like(user_id, ["milk", "yogurt", "labneh"]):
         tips.append("Freeze milk or yogurt in ice-cube trays for sauces and smoothies when they near expiry.")
     if _has_item_like(user_id, ["bread", "pita", "baguette", "tortilla"]):

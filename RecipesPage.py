@@ -3,11 +3,14 @@
 # - Adds per-section "Guide" tabs
 # - Makes "Max cookable" non-clickable
 # - Removes "Fix staples", "Relink to stocked items", and the staple toggle from UI
+# - Removed Book and Fav UI
+# - Detail view shows time and renders Steps (with robust DB fallback)
 
 from __future__ import annotations
 import math
+import json
 from datetime import date
-from typing import List, Dict
+from typing import List, Dict, Any
 
 import streamlit as st
 import recipes_core as rc
@@ -109,12 +112,11 @@ def _guide_md(section:str) -> str:
 - **Search**: type a word to match titles, tags, or cuisine.
 - **Filters**:
   - *Course*: narrow by meal type.
-  - *Favorites only*: show only starred recipes.
   - *Cookability*: **Can cook** (100% coverage), **Partial** (≥60%), **Missing** (<60%).
 - **Cards**:
   - Ring shows coverage %, color-coded.
   - Chips show tags and status.
-  - **View** opens details, **Cook** deducts stock (only if coverage ok), **Fav** toggles favorite.
+  - **View** opens details, **Cook** deducts stock (only if coverage ok).
         """
     if section == "create":
         return """
@@ -159,9 +161,122 @@ def _guide_md(section:str) -> str:
 - **Ingredients table**:
   - **need / have / short** in base unit for the current servings.
   - **alt stock** appears when coverage used an alternative stocked item.
-- **Favorite / Delete**: star to favorite; delete requires confirmation.
+- **Delete**: requires confirmation.
         """
     return "No guide yet."
+
+# ----------------------------- Steps loader (robust) --------------------------
+
+def _normalize_equipment(raw: Any) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, (list, tuple)):
+        return ", ".join(str(x) for x in raw if str(x).strip())
+    s = str(raw).strip()
+    if not s:
+        return ""
+    try:
+        j = json.loads(s)
+        if isinstance(j, list):
+            return ", ".join(str(x) for x in j if str(x).strip())
+    except Exception:
+        pass
+    return s
+
+def _load_steps(recipe_id: int) -> List[Dict[str, Any]]:
+    """
+    Returns list of dicts: {text:str, minutes:int, equipment:str}
+    Tries rc APIs first, then falls back to direct SQL with best-guess columns.
+    """
+    # Try likely rc APIs
+    for fn in ["get_recipe_steps", "get_steps_for_recipe", "steps_for_recipe", "get_steps"]:
+        if hasattr(rc, fn):
+            try:
+                rows = getattr(rc, fn)(recipe_id)
+                if rows:
+                    out: List[Dict[str, Any]] = []
+                    for s in rows:
+                        if isinstance(s, (list, tuple)):
+                            text = s[2] if len(s) > 2 else (s[1] if len(s) > 1 else "")
+                            minutes = s[3] if len(s) > 3 else 0
+                            equipment = s[4] if len(s) > 4 else ""
+                        else:
+                            text = s.get("text", "")
+                            minutes = s.get("minutes", 0)
+                            equipment = s.get("equipment", [])
+                        out.append({
+                            "text": str(text or "").strip(),
+                            "minutes": int(minutes or 0),
+                            "equipment": _normalize_equipment(equipment),
+                        })
+                    if out:
+                        return out
+            except Exception:
+                pass
+
+    # Fallback to DB sniffing
+    try:
+        conn = rc.get_connection()
+        c = conn.cursor()
+        tables = [t[0] for t in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        step_tables = [t for t in tables if t.lower() in ("recipes_steps", "recipe_steps", "steps", "directions")]
+        if not step_tables:
+            step_tables = [t for t in tables if "step" in t.lower() or "direction" in t.lower()]
+
+        for table in step_tables:
+            cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
+            cols_lower = [x.lower() for x in cols]
+
+            rid_col = "recipe_id" if "recipe_id" in cols_lower else None
+
+            text_col = None
+            for k in ["text", "step_text", "instruction", "body", "content", "desc"]:
+                if k in cols_lower:
+                    text_col = cols[cols_lower.index(k)]
+                    break
+
+            min_col = None
+            for k in ["minutes", "mins", "time_min", "time", "duration_min"]:
+                if k in cols_lower:
+                    min_col = cols[cols_lower.index(k)]
+                    break
+
+            eq_col = None
+            for k in ["equipment", "equip", "tools"]:
+                if k in cols_lower:
+                    eq_col = cols[cols_lower.index(k)]
+                    break
+
+            ord_col = None
+            for k in ["ord", "order", "position", "seq", "step_no", "idx"]:
+                if k in cols_lower:
+                    ord_col = cols[cols_lower.index(k)]
+                    break
+
+            if not rid_col or not text_col:
+                continue
+
+            order_sql = f" ORDER BY {ord_col}" if ord_col else ""
+            q = f"SELECT {text_col}{(','+min_col) if min_col else ''}{(','+eq_col) if eq_col else ''} FROM {table} WHERE {rid_col}=?{order_sql}"
+            rows = c.execute(q, (recipe_id,)).fetchall()
+
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                text = r[0]
+                minutes = r[1] if min_col and len(r) > 1 else 0
+                equipment = r[2] if eq_col and len(r) > 2 else ""
+                out.append({
+                    "text": str(text or "").strip(),
+                    "minutes": int(minutes or 0),
+                    "equipment": _normalize_equipment(equipment),
+                })
+            if out:
+                conn.close()
+                return out
+        conn.close()
+    except Exception:
+        pass
+    return []
 
 # ----------------------------- Cards / rows -----------------------------------
 
@@ -174,26 +289,19 @@ def recipe_card_row(r:tuple, cov:Dict):
         st.markdown(f"<div class='muted'>{course or 'Meal'} • {tmin} min • {diff}</div>", unsafe_allow_html=True)
         chips((tags or "").split(","))
         co1, co2 = st.columns([1,2])
-        with co1: ring(cov["coverage_pct"], 68, 8, cov["status"])
+        with co1:
+            ring(cov["coverage_pct"], 68, 8, cov["status"])
         with co2:
-            label = "✓ Can cook" if cov["status"]=="ok" else ("▲ Partial" if cov["status"]=="warn" else "■ Missing")
+            label = "✓ Can cook" if cov["status"] == "ok" else ("▲ Partial" if cov["status"] == "warn" else "■ Missing")
             st.markdown(f"<span class='chip {cov['status']}'>{label}</span>", unsafe_allow_html=True)
-            b1,b2,b3,b4 = st.columns(4)
+            b1, b2 = st.columns(2)
             if b1.button("View", key=f"v{rid}"):
-                st.session_state["recipe_view_id"]=rid; _safe_rerun()
-            if b2.button("Cook", disabled=cov["status"]=="err", key=f"ck{rid}"):
-                st.session_state["recipe_view_id"]=rid; st.session_state["recipe_cook_now"]=True; _safe_rerun()
-            if b3.button("Fav ★" if not fav else "Unfav ☆", key=f"fv{rid}"):
-                conn=rc.get_connection()
-                try:
-                    conn.execute("UPDATE recipes_catalog SET favorite=? WHERE id=?", (0 if fav else 1, rid))
-                    conn.commit()
-                except Exception:
-                    pass
-                conn.close()
+                st.session_state["recipe_view_id"] = rid
                 _safe_rerun()
-            if b4.button("Book ➕", key=f"bk{rid}"):
-                st.info("Books UI placeholder.")
+            if b2.button("Cook", disabled=cov["status"] == "err", key=f"ck{rid}"):
+                st.session_state["recipe_view_id"] = rid
+                st.session_state["recipe_cook_now"] = True
+                _safe_rerun()
 
 # ----------------------------- Library tab ------------------------------------
 
@@ -201,17 +309,15 @@ def tab_library(user_id:int):
     st.subheader("Library")
     inner = st.tabs(["Browse", "Guide"])
     with inner[0]:
-        qc1, qc2, qc3, qc4 = st.columns([2,1,1,1])
+        qc1, qc2, qc3 = st.columns([2,1,1])
         q = qc1.text_input("Search by title/tag/cuisine")
         course = qc2.selectbox("Course", ["All","Breakfast","Lunch","Dinner","Dessert","Snack","Drink"])
-        favonly = qc3.checkbox("Favorites only", value=False)
-        ready = qc4.selectbox("Cookability", ["Any","Can cook","Partial","Missing"])
+        ready = qc3.selectbox("Cookability", ["Any","Can cook","Partial","Missing"])
 
         rows = rc.get_recipes(user_id)
         out=[]
         for r in rows:
             rid, title, dsv, tmin, diff, tags, cuisine, diet, allergens, photo, rating, fav, course_val = r
-            if favonly and not fav: continue
             if q:
                 t=q.lower()
                 if t not in (title or "").lower() and t not in (tags or "").lower() and t not in (cuisine or "").lower():
@@ -375,7 +481,7 @@ def tab_create(user_id:int):
                         comps.append({
                             "name": r["name"].strip(),
                             "unit": r.get("unit","pcs"),
-                            "qty_per_serv": float(r["qty_per_serv"]),
+                            "qty_per_serv": float(r.get("qty_per_serv") or 0.0),
                             "staple": bool(r.get("staple")),
                             "optional": bool(r.get("optional")),
                             "yield_pct": float(r.get("yield_pct",100)),
@@ -573,15 +679,15 @@ def _detail_ui(user_id:int, recipe_id:int):
         st.caption(f"{course or 'Meal'} • {cuisine or '—'} • {diet or '—'}")
         st.caption(f"Nutrition/serv: {int(kcal or 0)} kcal, {prot}g P, {carbs}g C, {fat}g F")
         if notes: st.caption(notes)
+        st.caption(f"Time: {int(tmin or 0)} min • Difficulty: {diff}")
     with c2:
         servings=st.number_input("Servings", min_value=1, value=int(dsv or 2), step=1, key=f"serv_{recipe_id}")
         cov=rc.coverage_for_recipe(recipe_id, int(servings))
         bar(cov["coverage_pct"])
         st.write(f"Coverage **{cov['coverage_pct']}%**  •  Cost **₪{cov['cost_total']:.2f}**  •  ₪/portion **{cov['cost_per_portion']:.2f}**")
-        # Display-only max cookable
         if cov["max_cookable"]>0:
             st.markdown(f"<span class='chip'>Max cookable: {cov['max_cookable']}</span>", unsafe_allow_html=True)
-        c1b,c2b,c3b=st.columns(3)
+        c1b,c2b = st.columns(2)
         if c1b.button("Cook now", disabled=cov["status"]=="err", key=f"cook{recipe_id}"):
             ok,msg=rc.cook_recipe(user_id, recipe_id, int(servings))
             st.success(msg) if ok else st.error(msg)
@@ -589,14 +695,6 @@ def _detail_ui(user_id:int, recipe_id:int):
                 _invalidate_cache()
                 st.balloons()
                 _safe_rerun()
-        if c2b.button("Favorite ★" if not favorite else "Unfavorite ☆", key=f"fav_t{recipe_id}"):
-            try:
-                conn=rc.get_connection()
-                conn.execute("UPDATE recipes_catalog SET favorite=? WHERE id=?", (0 if favorite else 1, recipe_id))
-                conn.commit(); conn.close()
-            except Exception:
-                pass
-            _safe_rerun()
 
         del_key = f"confirm_del_{recipe_id}"
         if st.session_state.get(del_key):
@@ -617,12 +715,12 @@ def _detail_ui(user_id:int, recipe_id:int):
                 if st.button("Cancel", key=f"del_no_{recipe_id}"):
                     st.session_state.pop(del_key, None); _safe_rerun()
         else:
-            if c3b.button("Delete", key=f"del{recipe_id}"):
+            if c2b.button("Delete", key=f"del{recipe_id}"):
                 st.session_state[del_key] = True
                 _safe_rerun()
 
-    # Sub-tabs inside the detail: Ingredients | Guide
-    sub = st.tabs(["Ingredients", "Guide"])
+    # Sub-tabs inside the detail: Ingredients | Steps | Guide
+    sub = st.tabs(["Ingredients", "Steps", "Guide"])
     with sub[0]:
         comps=rc.get_recipe_components(recipe_id)
         cov=rc.coverage_for_recipe(recipe_id, int(st.session_state.get(f"serv_{recipe_id}", dsv or 2)))
@@ -632,7 +730,6 @@ def _detail_ui(user_id:int, recipe_id:int):
         if used_alt_any:
             st.markdown("<div class='note'>Coverage used a stocked alternative for at least one ingredient.</div>", unsafe_allow_html=True)
 
-        # Table-ish listing (no staple toggle here; utilities removed)
         for (_cid, ing_id, nm, bu, have, ppb, inv_type, q_base_def, is_staple, is_opt, y, wst, cat, sku, subs, note, tc) in comps:
             ci=cov_by_name.get(nm, None)
             need = ci["need_base"] if ci else 0.0
@@ -654,6 +751,21 @@ def _detail_ui(user_id:int, recipe_id:int):
                 g.write("")
 
     with sub[1]:
+        steps = _load_steps(recipe_id)
+        if not steps:
+            st.info("No steps saved for this recipe.")
+        else:
+            total_min = sum(int(s.get("minutes", 0) or 0) for s in steps)
+            if total_min > 0:
+                st.caption(f"Total time: {total_min} min")
+            for i, s in enumerate(steps, start=1):
+                c1, c2 = st.columns([6,1])
+                c1.write(f"**{i}.** {s.get('text','')}")
+                c2.write(f"{int(s.get('minutes',0) or 0)} min")
+                if s.get("equipment"):
+                    st.caption(f"Equipment: {s['equipment']}")
+
+    with sub[2]:
         st.markdown(_guide_md("detail"))
 
     if st.session_state.get("recipe_cook_now"):

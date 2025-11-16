@@ -1,19 +1,25 @@
-# App.py — Smart Inventory Manager (modernized)
-from datetime import date
-import traceback
-import importlib, importlib.util
+# App.py — Smart Inventory Manager
+# Clean routing + global KPI header (₪) shown on NON-home pages only.
+
+from datetime import date, timedelta
 from pathlib import Path
+import importlib, importlib.util
+import traceback
 import streamlit as st
 
 st.set_page_config(page_title="Smart Inventory Manager", page_icon="🍴", layout="wide")
 
-# ---------- Diagnostics store ----------
+# -----------------------------------------------------------------------------
+# Diagnostics
+# -----------------------------------------------------------------------------
 IMPORT_ERRORS = {}
 
 def _record_error(name: str, err: BaseException):
     IMPORT_ERRORS[name] = f"{type(err).__name__}: {err}\n" + traceback.format_exc()
 
-# ---------- Robust import helpers ----------
+# -----------------------------------------------------------------------------
+# Import helpers
+# -----------------------------------------------------------------------------
 def _import_attr(module_name: str, attr_name: str):
     try:
         mod = importlib.import_module(module_name)
@@ -42,13 +48,11 @@ def _find_and_load_page(attr_name: str, preferred_modules=(), filename_patterns=
             return fn
     here = Path(__file__).resolve().parent
     patterns = filename_patterns or (f"{attr_name}.py", f"{attr_name.lower()}.py")
-    candidates = []
     for pat in patterns:
-        candidates.extend(sorted(here.glob(pat)))
-    for py in candidates:
-        fn = _import_attr_from_file(py, attr_name)
-        if callable(fn):
-            return fn
+        for py in sorted(here.glob(pat)):
+            fn = _import_attr_from_file(py, attr_name)
+            if callable(fn):
+                return fn
     return None
 
 def _find_first_available(attr_names, preferred_modules=(), filename_patterns=()):
@@ -58,18 +62,43 @@ def _find_first_available(attr_names, preferred_modules=(), filename_patterns=()
             return fn
     return None
 
-# ---------- Load pages ----------
+# -----------------------------------------------------------------------------
+# KPI source (dashboards_core) with safe fallback
+# -----------------------------------------------------------------------------
+try:
+    from dashboards_core import TODAY, kpis_for_window, expiring_soon
+except Exception:
+    TODAY = date.today()
+    def kpis_for_window(*_, **__):
+        return {
+            "waste_total": 0.0,
+            "waste_vs_spend": None,
+            "waste_vs_inventory": None,
+            "waste_per_day": 0.0,
+            "spend_total": 0.0,
+            "wow": None,
+            "mom": None,
+            "expiring_items": 0,
+            "expiring_value": 0.0,
+            "inventory_value": 0.0,
+        }
+    def expiring_soon(*_, **__):
+        return 0, 0.0
+
+# -----------------------------------------------------------------------------
+# Load pages
+# -----------------------------------------------------------------------------
 home = _find_first_available(("home",), ("home",), ("home.py",))
-calendar_view = _find_first_available(("calendar_view",), ("CalendarView",), ("CalendarView.py",))
+calendar_view = _find_first_available(("calendar_view","render","app"), ("CalendarView",), ("CalendarView.py",))
 inventory = _find_first_available(("inventory",), ("Inventory","inventory"), ("Inventory.py","inventory.py"))
 shopping_page = _find_first_available(("shopping",), ("Shopping","shopping"), ("Shopping.py","shopping.py"))
 coach = _find_first_available(("coach",), ("SmartCoach",), ("SmartCoach.py","coach.py"))
 recipes = _find_first_available(("recipes_page","render"), ("RecipesPage",), ("RecipesPage.py","recipes.py"))
 dashboard = _find_first_available(("dashboard",), ("dashboard",), ("dashboard.py",))
-# Freeze AI page for now
-# ai_assistant = _find_first_available(("ai_assistant",), ("AI_Assistant",), ("AI_Assistant.py","ai_assistant.py"))
 
-# ---------- DB helpers ----------
+# -----------------------------------------------------------------------------
+# DB setup (safe)
+# -----------------------------------------------------------------------------
 def _safe_db_setup():
     try:
         from db import create_tables, reset_monthly_counters
@@ -78,34 +107,51 @@ def _safe_db_setup():
     except Exception as e:
         _record_error("db.init", e); return False
 
-def _safe_kpis(user_id: int):
-    try:
-        from db import get_connection, get_monthly_summary
-        conn = get_connection(); c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM inventory WHERE user_id=?", (user_id,))
-        total_items = c.fetchone()[0] or 0
-        ms = get_monthly_summary(user_id); conn.close()
-        return total_items, ms.get("used_steps",0), ms.get("expired_steps",0), float(ms.get("money_lost",0.0))
-    except Exception as e:
-        _record_error("db.kpis", e); return 0,0,0,0.0
-
 _db_ready = _safe_db_setup()
 
-# ---------- Helpers ----------
+# -----------------------------------------------------------------------------
+# Small UX helpers
+# -----------------------------------------------------------------------------
 def _user_name() -> str:
-    return st.session_state.get("name") or st.session_state.get("phone") or "User"
+    return (
+        st.session_state.get("name")
+        or st.session_state.get("user_name")
+        or st.session_state.get("phone")
+        or "User"
+    )
 
+def _inject_top_css():
+    st.markdown(
+        """
+        <style>
+          .app-kpi-row { margin-top: -8px; }
+          .app-kpi-row .stMetric {
+              background: rgba(16,24,51,.55);
+              border: 1px solid #22325a;
+              border-radius: 14px;
+              padding: 10px 12px;
+          }
+          .app-sep { margin: 8px 0 10px; border-top: 1px solid #1e2a44; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# -----------------------------------------------------------------------------
+# Auth gate
+# -----------------------------------------------------------------------------
 st.session_state.setdefault("authenticated", False)
 
-# ---------- Auth gate ----------
 if not st.session_state.get("authenticated"):
     if callable(home): home()
     else:
         st.title("Smart Inventory Manager")
-        st.error("Login page not available: make sure home.py defines home().")
+        st.error("Login page not available: expected home.py with home().")
     st.stop()
 
-# ---------- Page registry ----------
+# -----------------------------------------------------------------------------
+# Page registry (sidebar order)
+# -----------------------------------------------------------------------------
 PAGES = {}
 if callable(calendar_view): PAGES["🏡 Home"] = calendar_view
 elif callable(home): PAGES["🏡 Home"] = home
@@ -114,25 +160,27 @@ if callable(shopping_page): PAGES["🛒 Shopping"] = shopping_page
 if callable(coach): PAGES["🧠 Coach"] = coach
 if callable(recipes): PAGES["🍽️ Recipes"] = recipes
 if callable(dashboard): PAGES["📊 Stats"] = dashboard
-# if callable(ai_assistant): PAGES["🤖 AI"] = ai_assistant
 
-# ---------- Sidebar ----------
+# -----------------------------------------------------------------------------
+# Sidebar
+# -----------------------------------------------------------------------------
 with st.sidebar:
     st.title("🍴 Smart Inventory")
-    st.caption(f"Signed in as **{_user_name()}**")
+    name_display = (_user_name().split()[0].capitalize() if _user_name() else "User")
+    st.caption(f"Signed in as **{name_display}**")
 
     choice = st.radio("Navigate", list(PAGES.keys()) if PAGES else ["(no pages)"])
+    page_fn = PAGES.get(choice)
 
     st.markdown("---")
     if st.button("🔐 Logout"):
-        for k in ["authenticated","user_id","phone","name"]:
+        for k in ["authenticated","user_id","phone","name","user_name"]:
             st.session_state.pop(k, None)
         st.rerun()
 
     with st.expander("Advanced ▸ Diagnostics", expanded=False):
         st.write("**Loaded pages**")
-        for name in PAGES.keys():
-            st.write("•", name)
+        for name in PAGES.keys(): st.write("•", name)
         if IMPORT_ERRORS:
             st.write("**Import issues**")
             for name, err in IMPORT_ERRORS.items():
@@ -141,23 +189,41 @@ with st.sidebar:
         else:
             st.caption("No import errors recorded.")
 
-# ---------- KPI header ----------
-st.markdown(f"### 👋 Welcome back, {_user_name()}  —  {date.today().strftime('%A, %d %B %Y')}")
+# -----------------------------------------------------------------------------
+# Global KPI header — SHOW ONLY ON NON-HOME PAGES
+# -----------------------------------------------------------------------------
+_inject_top_css()
+
 uid = st.session_state.get("user_id")
-items, used, expired, lost = _safe_kpis(uid) if uid else (0,0,0,0.0)
+is_home = (page_fn is calendar_view) or (page_fn is home)
 
-c1,c2,c3,c4 = st.columns(4)
-c1.metric("📦 Items", items)
-c2.metric("✅ Used (mo)", used)
-c3.metric("⛔ Expired (mo)", expired)
-c4.metric("💸 Money lost (mo)", f"{lost:.2f}")
+if uid and not is_home:
+    start = TODAY - timedelta(days=30)
+    end = TODAY
+    k = kpis_for_window(int(uid), start, end)
+    exp_ct, exp_val = expiring_soon(int(uid), 7)
 
-st.markdown("---")
+    st.markdown('<div class="app-kpi-row">', unsafe_allow_html=True)
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    c1.metric("Inventory value", f"₪{float(k.get('inventory_value') or 0):,.0f}")
+    c2.metric("Spend 30d", f"₪{float(k.get('spend_total') or 0):,.0f}")
+    c3.metric("Waste 30d", f"₪{float(k.get('waste_total') or 0):,.0f}")
+    wvs = k.get("waste_vs_spend")
+    if wvs is not None:
+        c4.metric("Waste vs Spend", f"{float(wvs):.1f}%")
+    else:
+        c4.metric("Waste vs Spend", "—")
+    c5.metric("Expiring ≤7d (items)", f"{int(exp_ct or 0)}")
+    c6.metric("Expiring ≤7d (₪)", f"₪{float(exp_val or 0):,.0f}")
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('<div class="app-sep"></div>', unsafe_allow_html=True)
 
-# ---------- Render selected page ----------
+# -----------------------------------------------------------------------------
+# Render selected page
+# -----------------------------------------------------------------------------
 if PAGES:
     try:
-        PAGES[choice]()
+        page_fn()
     except Exception:
         st.error(f"Page **{choice}** failed to load.")
         with st.expander("Show error details"):
@@ -165,5 +231,4 @@ if PAGES:
 else:
     st.error("No pages are available. Check diagnostics in the sidebar.")
 
-st.markdown("---")
 st.caption(f"{date.today().isoformat()} • {choice}")
